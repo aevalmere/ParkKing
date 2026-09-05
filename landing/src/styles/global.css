@@ -1,0 +1,737 @@
+@import "tailwindcss";
+@import "@fontsource-variable/fraunces/opsz.css";
+@import "@fontsource-variable/archivo/wdth.css";
+
+/* PAYLOAD NOTE — why the italic Fraunces face is not imported.
+   vite-plugin-singlefile inlines every font as a base64 data-URI inside the one
+   <style> block, so a face that is *declared* is downloaded and parsed on first
+   paint even when no glyph on the page ever selects it. `opsz-italic.css` was
+   costing 228 KB (three unicode-range subsets: 28.8 + 93.1 + 106.2 KB) for zero
+   rendered italics — nothing in src/ or index.html sets font-style: italic, uses
+   an `italic` class, or renders <em>/<i>. If gold italic accents are ever
+   implemented (see BRIEF.md), re-add
+   `@import "@fontsource-variable/fraunces/opsz-italic.css";` above and accept
+   the weight. The remaining 465 KB of inlined faces is tracked separately — see
+   the note in README.md on splitting the fonts out of the single-file bundle. */
+
+/* ============================================================
+   PARK KING — marketing site
+   Light-first, product-forward. Shares the app's design language:
+   royal blue = action/product voice, gold crown = luxury/brand
+   voice, clean white cards on a paper field with quiet depth.
+   Fraunces (display serif) + Archivo (body) — never Inter/Roboto.
+   ============================================================ */
+
+@theme {
+  /* neutrals / paper */
+  --color-ink: #0a1020;         /* headline text */
+  --color-body: #3a4360;        /* body text */
+  --color-mute: #6b7590;        /* muted text */
+  --color-paper: #eef1f8;       /* page base */
+  --color-surface: #ffffff;     /* cards */
+  --color-line: #dde3f0;        /* hairline borders */
+
+  /* product voice — blue (matches the app's action colour) */
+  --color-royal: #2563eb;
+  --color-royal-bright: #3b82f6;  /* King on dark */
+  --color-royal-deep: #1d4ed8;
+  --color-royal-ink: #0b2a6b;
+  --color-sky: #38bdf8;
+
+  /* brand voice — gold crown */
+  --color-crown: #e8a33d;
+  --color-crown-soft: #f2c979;
+  --color-crown-deep: #b9791f;
+
+  /* cinematic dark (hero / finale / footer) */
+  --color-navy: #05091a;
+  --color-navy-2: #0a1430;
+  --color-haze: #93a4c7;
+
+  /* status echoes from the app */
+  --color-free: #16a34a;
+
+  --font-display: "Fraunces Variable", Georgia, "Times New Roman", serif;
+  --font-body: "Archivo Variable", Archivo, "Helvetica Neue", sans-serif;
+
+  --ease-lux: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-morph: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ---------- base ---------- */
+
+html {
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: #c2cbde transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--color-body);
+  background-color: var(--color-paper);
+  /* Paper, not a dashboard. The two corner radial "blobs" this replaced are the
+     single most template-looking thing a page can wear; depth here comes from a
+     faint ruled field and one directional wash instead, so the ground reads as
+     stock rather than as a gradient. */
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 119px,
+      color-mix(in srgb, var(--color-royal) 3.5%, transparent) 119px 120px
+    ),
+    linear-gradient(172deg, #f7f9fd 0%, #eef1f8 46%, #e7ecf6 100%);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+::selection {
+  background: var(--color-crown);
+  color: #160f02;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-royal);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar { width: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #c2cbde;
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #a9b4cf; background-clip: padding-box; }
+
+/* Component classes live in the `components` layer so Tailwind utilities
+   (text-white, text-crown, …) always win over them — otherwise .display's
+   own colour would override utility colours on the dark bands. */
+@layer components {
+
+/* ---------- type voices ---------- */
+
+.display {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-variation-settings: "SOFT" 0, "WONK" 1;
+  letter-spacing: -0.02em;
+  color: var(--color-ink);
+  line-height: 0.98;
+}
+.display-quiet {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-variation-settings: "SOFT" 44, "WONK" 0;
+  letter-spacing: -0.01em;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  font-family: var(--font-body);
+  font-variation-settings: "wdth" 118;
+  font-weight: 650;
+  font-size: 0.6875rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--color-royal-deep);
+}
+.eyebrow::before {
+  content: "";
+  width: 2rem;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--color-crown), var(--color-crown-soft));
+}
+.eyebrow--onDark { color: var(--color-crown-soft); }
+.eyebrow--center { justify-content: center; }
+
+/* ---------- editorial structure ----------
+   The page is laid out as a spec sheet, not a feature grid: a narrow label
+   column on the left, content offset into the wide column on the right, and
+   rules doing the work that boxes used to. `.spec` is the grid-breaking
+   element — below 900px it collapses to one column and the label sits above
+   its content like a running head. */
+
+.spec {
+  display: grid;
+  gap: 2.5rem 3.5rem;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 900px) {
+  .spec {
+    grid-template-columns: minmax(9rem, 15vw) minmax(0, 1fr);
+    gap: 0 clamp(2.5rem, 6vw, 6rem);
+  }
+  /* The label column hangs into the outer margin so the content column, not
+     the container, sets the optical left edge — the asymmetry is the point. */
+  .spec > :first-child { margin-left: calc(-1 * clamp(0rem, 3vw, 3.5rem)); }
+}
+.spec-label {
+  position: sticky;
+  top: 5.5rem;
+  align-self: start;
+}
+
+/* Rule that opens a section. Heavier on the left 3rem, hairline the rest of
+   the way — a masthead rule, not a divider. */
+.rule-open {
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--color-ink) 0 3rem,
+    var(--color-line) 3rem 100%
+  );
+}
+
+/* ---------- status strip ----------
+   The honest label. This page pitches a product that does not exist; saying so
+   plainly, in the same voice as everything else, is the difference between a
+   student project and a page pretending to be a company. Set as a ruled notice
+   rather than a coloured "banner" so it reads as a masthead note, not a toast. */
+
+.status {
+  border-top: 2px solid var(--color-ink);
+  border-bottom: 1px solid var(--color-line);
+  background: color-mix(in srgb, var(--color-crown) 7%, transparent);
+}
+.status-key {
+  font-family: var(--font-body);
+  font-variation-settings: "wdth" 112;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--color-crown-deep);
+  white-space: nowrap;
+}
+
+/* ---------- surfaces ---------- */
+
+/* Squared panel. No radius, no drop shadow — a printed card sits ON the page,
+   it does not float above it. Depth is one hairline plus a 2px ink edge. */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-left: 2px solid var(--color-ink);
+  border-radius: 0;
+}
+.card--plain { border-left-color: var(--color-line); }
+.card--gold { border-left-color: var(--color-crown); }
+
+/* Squared hairline tag. Pills read as chips in a component library; these read
+   as spec-sheet annotations, which is what they actually are. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 0;
+  font-family: var(--font-body);
+  font-variation-settings: "wdth" 112;
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-royal-ink);
+  border: 1px solid color-mix(in srgb, var(--color-royal) 30%, transparent);
+  background: transparent;
+}
+.chip--gold {
+  color: var(--color-crown-deep);
+  border-color: color-mix(in srgb, var(--color-crown) 55%, transparent);
+}
+.chip--free {
+  color: #0f7a37;
+  border-color: color-mix(in srgb, var(--color-free) 42%, transparent);
+}
+.chip--ghost {
+  color: var(--color-mute);
+  border-color: var(--color-line);
+}
+
+/* ---------- buttons ---------- */
+
+.cta {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  overflow: hidden;
+  /* Squared and solid. The glossy gradient pill with a sweeping shine that was
+     here is the single most recognisable "generated landing page" button; a
+     flat ink slab with a hard crown underline is both more specific to this
+     brand and more legible. */
+  border-radius: 0;
+  padding: 1.05rem 1.8rem;
+  font-family: var(--font-body);
+  font-variation-settings: "wdth" 108;
+  font-weight: 680;
+  font-size: 0.95rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #ffffff;
+  background: var(--color-ink);
+  border: 0;
+  border-bottom: 3px solid var(--color-crown);
+  cursor: pointer;
+  transition: transform 180ms var(--ease-lux), background-color 180ms var(--ease-lux);
+}
+.cta:active { transform: translateY(1px) scale(0.99); }
+.cta--gold {
+  color: #201401;
+  background: var(--color-crown);
+  border-bottom-color: var(--color-ink);
+}
+.cta--lg { padding: 1.2rem 2.2rem; font-size: 1rem; }
+@media (hover: hover) and (pointer: fine) {
+  .cta:hover { background: var(--color-royal-ink); transform: translateY(-2px); }
+  .cta--gold:hover { background: var(--color-crown-soft); }
+  .cta:hover:active { transform: translateY(0) scale(0.99); }
+}
+
+.ghostbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 0;
+  padding: 0.95rem 1.5rem;
+  font-weight: 620;
+  font-size: 0.98rem;
+  color: var(--color-ink);
+  border: 1px solid var(--color-line);
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  cursor: pointer;
+  transition: transform 160ms var(--ease-lux), border-color 200ms var(--ease-lux), background-color 200ms var(--ease-lux);
+}
+.ghostbtn:active { transform: scale(0.975); }
+.ghostbtn--onDark { color: #eaf0ff; border-color: rgba(147, 164, 199, 0.32); background: rgba(255, 255, 255, 0.06); }
+@media (hover: hover) and (pointer: fine) {
+  .ghostbtn:hover { border-color: color-mix(in srgb, var(--color-royal) 45%, transparent); background: #fff; }
+  .ghostbtn--onDark:hover { border-color: rgba(232, 163, 61, 0.5); background: rgba(255, 255, 255, 0.1); }
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: 999px;
+  padding: 0.55rem 1.05rem;
+  font-size: 0.83rem;
+  font-weight: 620;
+  color: #fff;
+  background: var(--color-royal);
+  border: 1px solid rgba(29, 78, 216, 0.5);
+  box-shadow: 0 10px 24px -12px rgba(37, 99, 235, 0.7);
+  transition: transform 160ms var(--ease-lux), box-shadow 220ms var(--ease-lux);
+}
+.pill:active { transform: scale(0.97); }
+@media (hover: hover) and (pointer: fine) {
+  .pill:hover { transform: translateY(-1px); box-shadow: 0 16px 30px -12px rgba(37, 99, 235, 0.8); }
+}
+
+/* ---------- scroll reveal (transform/opacity only) ---------- */
+
+.reveal {
+  opacity: 0;
+  transform: translateY(26px);
+  transition:
+    opacity 720ms var(--ease-out),
+    transform 720ms var(--ease-out);
+  transition-delay: var(--reveal-delay, 0ms);
+  will-change: transform, opacity;
+}
+.reveal.in {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- app mock card (mirrors the demo UI) ---------- */
+
+.appcard {
+  background: #fff;
+  border: 1px solid var(--color-line);
+  border-radius: 0;
+  padding: 0.95rem 1rem 0.9rem;
+  position: relative;
+}
+.appcard::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0.8rem; bottom: 0.8rem;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--avail, var(--color-royal));
+}
+
+/* ---------- billing toggle (pricing) ---------- */
+
+.segbtn {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 640;
+  font-size: 0.83rem;
+  color: var(--color-mute);
+  padding: 0.5rem 0.95rem;
+  border-radius: 999px;
+  transition: color 180ms var(--ease-lux);
+}
+.segbtn[data-on="true"] { color: #fff; }
+
+/* ---------- grain (very subtle on light) ---------- */
+
+/* The one image data-URI on the page, and it stays inline on purpose: 364 bytes
+   of feTurbulence. Pulling it out to public/tex/grain.svg would trade those 364
+   bytes for a whole extra round trip, and the overlay would pop in after paint
+   instead of being there from the first frame. Inline is the right call below
+   ~2 KB. (The bulk of the inline <style> is fonts, not this — see the payload
+   note at the top of the file.) */
+.grain-tex {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23n)' opacity='0.9'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
+}
+
+/* ============================================================
+   FILM ACT — pinned, scroll-scrubbed opening film
+   Wrapper height is set inline (~520vh); a sticky child holds the
+   <video>, which is scrubbed by scroll (never autoplayed). Beat
+   overlays + progress rail are driven imperatively (transform/opacity
+   only) from one rAF loop. Static/reduced-motion fork shares the copy.
+   ============================================================ */
+
+.film-sticky {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100svh;
+  overflow: hidden;
+  background: #04070f; /* letterbox behind the cover video */
+}
+
+.film-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 57% 44%;
+  transform: scale(1.03);
+  background: #04070f;
+}
+@media (max-width: 767px) {
+  .film-video { object-position: 64% 42%; }
+}
+
+/* persistent scrims — they only ever DARKEN the frame */
+.film-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.film-scrim--bottom {
+  background: linear-gradient(
+    0deg,
+    rgba(4, 7, 15, 0.95) 0%,
+    rgba(4, 7, 15, 0.78) 12%,
+    rgba(4, 7, 15, 0.4) 30%,
+    rgba(4, 7, 15, 0.08) 46%,
+    transparent 58%
+  );
+}
+.film-scrim--left {
+  background: linear-gradient(
+    90deg,
+    rgba(4, 7, 15, 0.72) 0%,
+    rgba(4, 7, 15, 0.36) 26%,
+    transparent 52%
+  );
+}
+.film-scrim--top {
+  background: linear-gradient(180deg, rgba(4, 7, 15, 0.74) 0%, rgba(4, 7, 15, 0.42) 8%, rgba(4, 7, 15, 0.12) 15%, transparent 24%);
+}
+/* Portrait crops the film hard and the copy runs full-width over the bright
+   studio frames — carry the dark further up so every beat stays legible. */
+@media (max-width: 767px) {
+  .film-scrim--bottom {
+    background: linear-gradient(
+      0deg,
+      rgba(4, 7, 15, 0.97) 0%,
+      rgba(4, 7, 15, 0.93) 24%,
+      rgba(4, 7, 15, 0.78) 44%,
+      rgba(4, 7, 15, 0.46) 63%,
+      rgba(4, 7, 15, 0.16) 80%,
+      transparent 95%
+    );
+  }
+  .film-scrim--top {
+    background: linear-gradient(180deg, rgba(4, 7, 15, 0.66) 0%, rgba(4, 7, 15, 0.2) 12%, transparent 26%);
+  }
+}
+
+/* beat overlay — one column, bottom-left; JS sets opacity + translateY */
+.film-beat {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  opacity: 0;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+.film-beat-inner {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 clamp(1.25rem, 5vw, 4rem) clamp(3.25rem, 9vh, 6.5rem);
+}
+.film-beat-col { max-width: 46rem; }
+.film-beat-rule {
+  display: block;
+  width: clamp(2.4rem, 6vw, 3.6rem);
+  height: 2px;
+  margin-bottom: 1.5rem;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--color-crown), var(--color-crown-soft));
+}
+
+/* progress rail — thin vertical track, 5 ticks, active gold */
+.film-rail {
+  position: absolute;
+  right: clamp(1rem, 2.4vw, 2.1rem);
+  top: 50%;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.85rem;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+@media (min-width: 768px) {
+  .film-rail { display: flex; }
+}
+.film-tick {
+  width: 2px;
+  height: 26px;
+  border-radius: 2px;
+  background: rgba(233, 239, 255, 0.24);
+  transform-origin: center;
+  transition: background-color 260ms var(--ease-lux), transform 260ms var(--ease-lux);
+}
+.film-tick[data-on='true'] {
+  background: linear-gradient(180deg, var(--color-crown-soft), var(--color-crown));
+  transform: scaleY(1.42);
+}
+
+/* scroll hint — only near the very start (JS fades it) */
+.film-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 1.5rem;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  will-change: opacity;
+}
+.film-hint span {
+  display: block;
+  width: 1px;
+  height: 2rem;
+  background: linear-gradient(180deg, var(--color-crown-soft), transparent);
+}
+
+/* static / reduced-motion fork: poster backdrop + stacked dark beats */
+.film-static-bg {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100svh;
+  overflow: hidden;
+  background: #04070f;
+}
+.film-static-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 57% 44%;
+}
+.film-static-beat {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: flex;
+  align-items: flex-end;
+}
+
+/* dark → light handoff band (no hard seam into the paper sections) */
+.film-to-light {
+  position: relative;
+  height: clamp(180px, 26vh, 320px);
+  margin-top: -1px;
+  background: linear-gradient(
+    180deg,
+    #04070f 0%,
+    #060c1f 24%,
+    rgba(11, 20, 48, 0.55) 52%,
+    rgba(238, 241, 248, 0) 100%
+  );
+}
+.film-to-light::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(58% 130% at 50% 0%, rgba(37, 99, 235, 0.16), transparent 62%);
+}
+
+/* ---------- ParkKing wordmark (crown floats above "King") ---------- */
+
+.wordmark {
+  position: relative;
+  display: inline-flex;
+  align-items: flex-end;
+  line-height: 1;
+  font-family: var(--font-body);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  white-space: nowrap;
+  padding-top: 0.62em; /* room for the floating crown */
+}
+.wm-king {
+  position: relative;
+  display: inline-block;
+}
+.wm-crown {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% - 0.26em); /* slight overlap of the cap height */
+  width: 0.82em;
+  height: 0.82em;
+  transform: translateX(-50%);
+  filter: drop-shadow(0 2px 6px rgba(11, 20, 48, 0.28));
+}
+
+/* ---------- plan comparison matrix ---------- */
+
+.compare-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  border-radius: 1.35rem;
+}
+.compare {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.compare th,
+.compare td {
+  padding: 0.9rem 1.1rem;
+  text-align: center;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--color-line);
+}
+.compare thead th {
+  border-bottom: 1px solid var(--color-line);
+  padding-top: 1.1rem;
+  padding-bottom: 1.1rem;
+}
+.compare-feat {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  text-align: left;
+  background: var(--color-surface);
+  box-shadow: 14px 0 18px -16px rgba(12, 24, 56, 0.35);
+  min-width: 15rem;
+}
+.compare-feat-label {
+  font-weight: 640;
+  color: var(--color-ink);
+  font-size: 0.95rem;
+}
+.compare-feat-note {
+  margin-top: 0.15rem;
+  font-size: 0.78rem;
+  color: var(--color-mute);
+  font-weight: 500;
+}
+.compare-tier {
+  font-family: var(--font-body);
+  font-weight: 720;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-mute);
+}
+/* Pro column — gold top rule + tint + crown flag */
+.compare-col--pro {
+  background: color-mix(in srgb, var(--color-crown) 7%, var(--color-surface));
+}
+thead .compare-col--pro {
+  border-top: 2.5px solid var(--color-crown);
+  color: var(--color-crown-deep);
+}
+.compare-pop {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+  padding: 0.24rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #201401;
+  background: linear-gradient(180deg, var(--color-crown-soft), var(--color-crown));
+  box-shadow: 0 8px 20px -12px rgba(232, 163, 61, 0.9);
+}
+.compare-glyph {
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+}
+.compare-text {
+  font-size: 0.86rem;
+  font-weight: 620;
+  color: var(--color-body);
+}
+.compare-text--mute { color: var(--color-mute); font-weight: 560; }
+.compare-text--pos { color: #0f7a37; }
+.compare-text--gold { color: var(--color-crown-deep); }
+.compare-dash { color: var(--color-line); }
+
+/* ---------- misc ---------- */
+
+.rule-gold {
+  height: 2px;
+  border: 0;
+  background: linear-gradient(90deg, var(--color-crown), transparent);
+}
+
+} /* end @layer components */
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .cta::after { display: none; }
+  /* The film act renders its static fork under reduced motion (no <video>,
+     no scrub); beats are plain stacked sections, so nothing here to hide. */
+}

@@ -1,0 +1,81 @@
+{
+  "status": "partial",
+  "shard_id": "parkking-placeholder-film",
+  "video": {
+    "path": "/home/user/EthanZhang/public/media/parkking-hero.mp4",
+    "bytes": 11159823,
+    "duration_s": 15.0,
+    "container": "ISO-BMFF MP4 (moov-before-mdat, faststart layout)",
+    "codec": "vp09.00.31.08 (VP9 profile 0, 8-bit 4:2:0, BT.709)",
+    "resolution": "1280x720",
+    "fps": 24,
+    "frames": 360,
+    "keyframes": 91,
+    "keyframe_interval": 4,
+    "bitrate_bps": 6000000
+  },
+  "poster": {
+    "path": "/home/user/EthanZhang/public/media/poster.jpg",
+    "source": "rendered frame f0015.jpg (t=0.625 s, first frame at/after 0.6 s), JPEG q92"
+  },
+  "previews": [
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p1.jpg",
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p2.jpg",
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p3.jpg",
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p4.jpg",
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p5.jpg",
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p6.jpg",
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p7.jpg",
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p8.jpg",
+    "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-previews/p9.jpg"
+  ],
+  "frames_rendered": 360,
+  "frames_dir": "/tmp/claude-0/-home-user-EthanZhang/321bf849-684f-5355-937a-9455711bbb59/scratchpad/film-frames",
+  "pipeline": {
+    "scene": "/home/user/EthanZhang/tools/video/scene.html",
+    "renderer": "/home/user/EthanZhang/tools/video/render.mjs",
+    "capture": "playwright-core -> Chromium headless 141 (/opt/pw-browsers/chromium), viewport 1280x720 dsf 1, seek(t) + double requestAnimationFrame, JPEG q92 per frame",
+    "encode": "deterministic re-seek of the same scene -> WebCodecs VideoEncoder (VP9, bitrateMode variable, latencyMode quality, forced keyframe every 4 frames) -> hand-built ISO-BMFF muxer in Node (ftyp/moov/mdat, stss from actual keyframes, mdhd timescale 24000 with 1000-tick samples = exact 24 fps)"
+  },
+  "verification": {
+    "determinism": "frames 120 and 300 re-rendered in a fresh browser session are byte-identical to the stored captures",
+    "browser_decode": {
+      "duration_s": 15.0,
+      "videoWidth": 1280,
+      "videoHeight": 720,
+      "seek_decode_probe": [
+        { "t": 0.6, "meanLum": 212.3 },
+        { "t": 7.0, "meanLum": 137.0 },
+        { "t": 11.5, "meanLum": 26.9 },
+        { "t": 14.5, "meanLum": 207.1 }
+      ]
+    },
+    "mvhd_duration_s": 15.0,
+    "art_qc": "p1/p4/p6/p8 (plus full spot set) reviewed visually: eased motion, layered lighting (key, rim, contact shadow, vignette 0.10-0.14, grain 0.035), locked palette, phone->laptop->console UI morph continuity, no legible text; two art defects found and fixed before the final render (floor line now morphs down with the laptop so its reflection stays coherent; exterior bays widened + car silhouette rebuilt with wheel-arch cutouts)"
+  },
+  "deviations": [
+    {
+      "instruction": "encode with /opt/pw-browsers/ffmpeg-1011/ffmpeg-linux using libx264 -preset slow -crf 21 -g 4 -bf 0 mp4",
+      "reality": "that binary is Playwright's minimal build: --disable-everything with only vp8-webm/png/image2pipe enabled; it has no libx264, no mp4 muxer, no jpeg encoder, no image2 demuxer, and even '-preset' is an unrecognized option. Chromium's WebCodecs offers no H.264 encoder in this build (probed: avc1 unsupported; vp9/vp8 supported). No network access to obtain another encoder.",
+      "attempt_log": [
+        "prescribed libx264 encode -> \"Unrecognized option 'preset'. Error splitting the argument list: Option not found\"",
+        "prescribed poster extract -> \"Error opening input: Invalid data found when processing input\" (no mp4/mov demuxer)",
+        "ffmpeg -i duration probe -> same demuxer failure; duration instead verified via mvhd box parse AND Chromium video element playback"
+      ],
+      "resolution": "VP9-in-MP4 via WebCodecs + custom ISO-BMFF muxer; -g 4 honored via forced keyframes every 4 frames (no B-frames, matching -bf 0); 14 MB cap logic retained (first pass 11.2 MB, no re-encode needed); poster taken from the pristine source frame at t=0.625 s"
+    }
+  ],
+  "notes": [
+    "scene.html exposes window.PK = { W:1280, H:720, FPS:24, DURATION:15, seek(t) }; all randomness is mulberry32-seeded (grain tiles, dust, per-frame grain offsets keyed to frame index) - no Date.now / Math.random",
+    "storyboard implemented per spec: shot 1 studio phone reveal (materialize 0-0.55 s, rim flash 0.35-0.9 s, grain flicker x3 frames 11-13, push-in 1.000->1.045); shot 2 liquid morph 4.2-6.9 s with 2% overshoot settling by 7.3 s, base slab 6.6-7.6 s, bg +/-2% orbit, skew -1.5deg->+1.0deg; shot 3 dive 1->3.2 (easeInCubic) with 2 ghost copies at alpha 0.15 during 9.78-10.24 s, white flash 10.15-10.45-10.8 s, cabin with windshield warmth ~18-20%, 440x260 console with 6 icon dots; shot 4 recede + 12.6-13.2 s crossfade, car easeOutQuint glide to centered stop at 14.3 s, breath-slow hold, badge glint at ~14.6 s",
+    "easings: easeOutQuint / easeInOutCubic / easeInCubic / easeOutBack only (plus constant drifts and sin ambients); composition law held: device center-right ~62%, left third kept clean in shots 1-3, car centered in shot 4",
+    "project node_modules was concurrently reinstalled mid-run and playwright-core vanished; render.mjs now resolves it from a candidate list (project, then global /opt/node22 copy)",
+    "poster.jpg is JPEG q92 1280x720 from the exact rendered frame set (higher fidelity than a -q:v 3 re-decode of the lossy video would have been)"
+  ],
+  "gaps": [
+    {
+      "gap": "codec is VP9-in-MP4 rather than the prescribed H.264: plays in Chrome/Edge/Firefox and Safari 17.4+, but may not play on older Safari/iOS (<17.4) or devices without VP9 support",
+      "retry_recommendation": "when an environment with a real ffmpeg (libx264) or network access is available, re-encode losslessly from the archived frame set: ffmpeg -framerate 24 -i film-frames/f%04d.jpg -c:v libx264 -preset slow -crf 21 -g 4 -bf 0 -pix_fmt yuv420p -movflags +faststart parkking-hero.mp4 (frames retained at the frames_dir path; scene.html re-renders them byte-identically at any time)"
+    }
+  ]
+}

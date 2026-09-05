@@ -1,0 +1,1099 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ParkKing — hero film</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #05091a; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+'use strict';
+/* ============================================================================
+   ParkKing hero commercial — deterministic pseudo-3D canvas film.
+   window.PK.seek(t) fully redraws the exact frame for time t (pure function of t).
+   16.0 s, 24 fps, 1920x1080. ONE continuous camera, dark navy grade throughout.
+   NO white flash, no bright transitions.
+
+   Journey (fractions of 16 s):
+     B1 0.00–0.16  Phone floating in a dark navy studio (app: map, gold pins, route)
+     B2 0.16–0.36  Phone morphs into a laptop (liquid-metal), slow orbit
+     B3 0.36–0.54  Laptop morphs into a car dashboard/console; cabin materializes
+     B4 0.54–0.76  Camera pulls back between the seats, out the rear glass, behind car
+     B5 0.76–1.00  Car folds down into a painted parking bay; gold crown + P paints in
+
+   Pseudo-3D: own pinhole camera (project x,y,z), rounded-rect extrusions,
+   silhouette morphs via interpolated control points, painter's-algorithm layering.
+   All motion eased with custom cubic-bezier curves. Seeded PRNG only for grain.
+   ========================================================================= */
+
+const W = 1920, H = 1080, FPS = 24, DURATION = 16;
+
+/* ---- palette (locked to the brief tokens) ------------------------------- */
+const NAVY   = '#05091a';   // stage / deep base
+const PANEL  = '#0a1430';   // panel navy (screens, surfaces)
+const ROYAL  = '#2563eb';   // royal blue (route, product voice)
+const BRIGHT = '#3b82f6';   // bright blue
+const SKY    = '#38bdf8';   // sky (cool light hints)
+const GOLD   = '#e8a33d';   // gold (crown, hero pin — luxury voice)
+const SOFTG  = '#f2c979';   // soft gold
+const HAZE   = '#93a4c7';   // cool haze
+const WHITE  = '#eef3fb';   // near-white — TINY UI details / paint lines only
+// derived shades (kept in-family, all dark)
+const NAVY2  = '#070d22';   // slightly lifted navy
+const STEEL  = '#141d3a';   // brushed metal midtone
+const STEELHI= '#243156';   // metal highlight
+const EDGE   = '#2a3a5e';   // edge line
+const INK    = '#040814';   // deepest shadow
+const TAILL  = '#c6432a';   // warm red-amber taillight core
+const TAILLHI= '#e8632a';   // taillight glow amber
+
+function rgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+}
+function mix(h1, h2, p) {
+  const a = parseInt(h1.slice(1), 16), b = parseInt(h2.slice(1), 16);
+  const r = Math.round(((a >> 16 & 255)) + (((b >> 16 & 255)) - ((a >> 16 & 255))) * p);
+  const g = Math.round(((a >> 8 & 255)) + (((b >> 8 & 255)) - ((a >> 8 & 255))) * p);
+  const bl = Math.round(((a & 255)) + (((b & 255)) - ((a & 255))) * p);
+  return 'rgb(' + r + ',' + g + ',' + bl + ')';
+}
+
+/* ---- math + easing ------------------------------------------------------ */
+const clamp01 = p => p < 0 ? 0 : p > 1 ? 1 : p;
+const lerp = (a, b, p) => a + (b - a) * p;
+const ph = (t, a, b) => clamp01((t - a) / (b - a));         // phase 0..1 over [a,b]
+const TAU = Math.PI * 2, D2R = Math.PI / 180;
+
+// custom cubic-bezier easing solver (Newton + bisection) — no weak built-ins
+function cubicBezier(x1, y1, x2, y2) {
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  const fx = t => ((ax * t + bx) * t + cx) * t;
+  const fy = t => ((ay * t + by) * t + cy) * t;
+  const dfx = t => (3 * ax * t + 2 * bx) * t + cx;
+  return function (x) {
+    if (x <= 0) return 0; if (x >= 1) return 1;
+    let t = x;
+    for (let i = 0; i < 8; i++) { const e = fx(t) - x; if (Math.abs(e) < 1e-6) break; const d = dfx(t); if (Math.abs(d) < 1e-7) break; t -= e / d; }
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    return fy(t);
+  };
+}
+const easeLux   = cubicBezier(0.22, 1, 0.30, 1);      // strong ease-out (reveals)
+const easeMorph = cubicBezier(0.76, 0, 0.24, 1);      // strong ease-in-out (morphs)
+const easeDraw  = cubicBezier(0.32, 0.72, 0, 1);      // iOS drawer curve (camera)
+const easeSoft  = cubicBezier(0.62, 0, 0.38, 1);      // smooth in-out (camera channels)
+const easeOutBk = cubicBezier(0.34, 1.32, 0.5, 1);    // gentle overshoot (pins/dots)
+const bell = p => { p = clamp01(p); return Math.sin(Math.PI * p); };          // 0→1→0
+const seg = (t, a, b, e) => e(ph(t, a, b));
+
+/* ---- seeded PRNG (grain only — everything else is a pure function of t) --- */
+function mulberry32(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let z = s; z = Math.imul(z ^ (z >>> 15), z | 1);
+    z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+    return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ---- canvas + offscreen buffers ----------------------------------------- */
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d', { alpha: false });
+const uiBuf = document.createElement('canvas');           // flat app UI texture
+const uictx = uiBuf.getContext('2d');
+
+// grain tiles (deterministic overlay noise)
+const GRAIN_N = 4, GRAIN_S = 256, grainTiles = [];
+for (let g = 0; g < GRAIN_N; g++) {
+  const tc = document.createElement('canvas'); tc.width = GRAIN_S; tc.height = GRAIN_S;
+  const tg = tc.getContext('2d'); const img = tg.createImageData(GRAIN_S, GRAIN_S);
+  const r = mulberry32(1777 + g * 809);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 128 + Math.floor((r() - 0.5) * 70);
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+  }
+  tg.putImageData(img, 0, 0); grainTiles.push(tc);
+}
+
+/* ============================================================================
+   CAMERA — pinhole. World: +X right, +Y down, +Z into the scene (away).
+   Camera faces +Z; parts of the car are laid out along Z so a single dolly
+   back (decreasing Z) passes the seats, the rear glass, then emerges behind.
+   ========================================================================= */
+const NEAR = 24;
+
+// keyframed camera channels {t, v}; interpolated with an eased curve per segment
+function kf(chan, t) {
+  const a = chan;
+  if (t <= a[0].t) return a[0].v;
+  if (t >= a[a.length - 1].t) return a[a.length - 1].v;
+  for (let i = 0; i < a.length - 1; i++) {
+    if (t >= a[i].t && t <= a[i + 1].t) {
+      const p = (a[i].e || easeSoft)(ph(t, a[i].t, a[i + 1].t));
+      return lerp(a[i].v, a[i + 1].v, p);
+    }
+  }
+  return a[a.length - 1].v;
+}
+
+// camera trajectory. Forward-facing (+Z) throughout. B3 drifts back into the
+// cabin; B4 accelerates the dolly out past the seats and the (timed) rear-glass
+// pass, settling FAR behind the car for a framed rear 3/4; B5 cranes down.
+const CAM_PZ = [
+  { t: 0.00, v: 700 }, { t: 2.56, v: 764, e: easeLux },
+  { t: 5.76, v: 704, e: easeSoft }, { t: 8.64, v: 384, e: easeDraw },
+  { t: 10.10, v: -120, e: easeDraw }, { t: 11.60, v: -640, e: easeSoft },
+  { t: 12.16, v: -720, e: easeSoft }, { t: 13.80, v: -600, e: easeSoft }, { t: 16.00, v: -300, e: easeLux },
+];
+const CAM_PX = [
+  { t: 0.00, v: 4 }, { t: 2.56, v: 10 }, { t: 5.76, v: -12, e: easeSoft },
+  { t: 8.64, v: -26 }, { t: 10.10, v: -60 }, { t: 11.60, v: -112, e: easeSoft },
+  { t: 12.16, v: -126 }, { t: 13.80, v: -86 }, { t: 16.00, v: -30, e: easeLux },
+];
+const CAM_PY = [
+  { t: 0.00, v: -8 }, { t: 5.76, v: -8 }, { t: 8.64, v: -14 },
+  { t: 10.10, v: -14 }, { t: 11.60, v: -30, e: easeSoft }, { t: 12.16, v: -34 },
+  { t: 13.80, v: -104, e: easeSoft }, { t: 16.00, v: -300, e: easeLux },
+];
+const CAM_PITCH = [ // degrees; + looks down
+  { t: 0.00, v: 0 }, { t: 8.64, v: 1.4 }, { t: 10.10, v: 1.0 },
+  { t: 11.60, v: 3.0 }, { t: 12.16, v: 3.6 }, { t: 13.80, v: 14, e: easeSoft }, { t: 16.00, v: 38, e: easeLux },
+];
+const CAM_YAW = [ // degrees; NEGATIVE looks right (see project()). Late: rear-left 3/4.
+  { t: 0.00, v: 0 }, { t: 2.56, v: -1.2 }, { t: 5.76, v: 1.6, e: easeSoft },
+  { t: 8.64, v: 0.6 }, { t: 10.10, v: -2.0 }, { t: 11.60, v: -8.0, e: easeDraw },
+  { t: 12.16, v: -9.5 }, { t: 13.80, v: -7.0 }, { t: 16.00, v: -2.0 },
+];
+const CAM_F = [
+  { t: 0.00, v: 1150 }, { t: 8.64, v: 1180 }, { t: 11.60, v: 1230, e: easeSoft },
+  { t: 12.16, v: 1250 }, { t: 16.00, v: 1300, e: easeSoft },
+];
+
+function camAt(t) {
+  // tiny idle handheld float (kept sub-pixel-scale, always eased/continuous)
+  const fx = Math.sin(t * 0.55 + 0.4) * 1.6 + Math.sin(t * 0.9) * 0.6;
+  const fy = Math.sin(t * 0.47 + 1.1) * 1.3;
+  const fyaw = Math.sin(t * 0.4 + 0.7) * 0.12;
+  return {
+    px: kf(CAM_PX, t) + fx, py: kf(CAM_PY, t) + fy, pz: kf(CAM_PZ, t),
+    pitch: kf(CAM_PITCH, t) * D2R, yaw: (kf(CAM_YAW, t) + fyaw) * D2R,
+    f: kf(CAM_F, t),
+  };
+}
+
+// project a world point through the camera → {x,y,scale,z,ahead}
+function project(cam, x, y, z) {
+  let dx = x - cam.px, dy = y - cam.py, dz = z - cam.pz;
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  let rx = dx * cy + dz * sy;
+  let rz = -dx * sy + dz * cy;
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  let ry = dy * cp - rz * sp;
+  let rz2 = dy * sp + rz * cp;
+  const ahead = rz2 > NEAR;
+  const zz = ahead ? rz2 : NEAR;
+  const s = cam.f / zz;
+  return { x: W / 2 + rx * s, y: H / 2 + ry * s, scale: s, z: rz2, ahead };
+}
+
+/* ---- geometry helpers --------------------------------------------------- */
+// fixed-topology rounded-rect outline (local, centered) — same index order for
+// every (w,h,r) so two outlines can be lerped point-for-point (silhouette morph)
+const RR_C = 8;                                   // pts per corner
+function rrOutline(w, h, r) {
+  const hw = w / 2, hh = h / 2; r = Math.min(r, hw, hh);
+  const pts = [];
+  const corners = [[hw - r, hh - r, 0], [-hw + r, hh - r, Math.PI / 2], [-hw + r, -hh + r, Math.PI], [hw - r, -hh + r, -Math.PI / 2]];
+  for (const [cx, cy, a0] of corners)
+    for (let i = 0; i <= RR_C; i++) { const a = a0 + (Math.PI / 2) * (i / RR_C); pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); }
+  return pts;
+}
+const lerpOutline = (A, B, p) => A.map((q, i) => [lerp(q[0], B[i][0], p), lerp(q[1], B[i][1], p)]);
+
+// project a local outline placed at object {cx,cy,cz,yaw} on a plane z=lz
+function placeOutline(cam, outline, o, lz) {
+  const cy = Math.cos(o.yaw || 0), sy = Math.sin(o.yaw || 0);
+  const out = []; let ahead = true, sz = 0;
+  for (const [lx, ly] of outline) {
+    const wx = lx * cy + lz * sy + o.cx;
+    const wz = -lx * sy + lz * cy + o.cz;
+    const wy = ly + o.cy;
+    const p = project(cam, wx, wy, wz);
+    if (!p.ahead) ahead = false; sz += p.z;
+    out.push(p);
+  }
+  return { pts: out, ahead, z: sz / outline.length };
+}
+function pathPts(g, pts) { g.beginPath(); g.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y); g.closePath(); }
+
+// draw a filled world quad [p0..p3] (already projected screen pts)
+function quad(g, P, fill, a) { if (a <= 0) return; g.globalAlpha = a; g.fillStyle = fill; g.beginPath(); g.moveTo(P[0].x, P[0].y); g.lineTo(P[1].x, P[1].y); g.lineTo(P[2].x, P[2].y); g.lineTo(P[3].x, P[3].y); g.closePath(); g.fill(); g.globalAlpha = 1; }
+const avgZ = P => P.reduce((s, p) => s + p.z, 0) / P.length;
+const projQuad = (cam, a, b, c, d) => [project(cam, ...a), project(cam, ...b), project(cam, ...c), project(cam, ...d)];
+
+// ---- near-plane-clipped polygon fill (for surfaces the camera flies THROUGH:
+//      cabin walls/roof/floor straddle the camera, so they must be clipped) ----
+function toCam(cam, x, y, z) {
+  const dx = x - cam.px, dy = y - cam.py, dz = z - cam.pz;
+  const cyw = Math.cos(cam.yaw), syw = Math.sin(cam.yaw);
+  const rx = dx * cyw + dz * syw, rz = -dx * syw + dz * cyw;
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  return { x: rx, y: dy * cp - rz * sp, z: dy * sp + rz * cp };
+}
+function clipNear(poly) {                       // Sutherland–Hodgman against z >= NEAR
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const ain = a.z >= NEAR, bin = b.z >= NEAR;
+    if (ain) out.push(a);
+    if (ain !== bin) { const tt = (NEAR - a.z) / (b.z - a.z); out.push({ x: a.x + (b.x - a.x) * tt, y: a.y + (b.y - a.y) * tt, z: NEAR }); }
+  }
+  return out;
+}
+function poly3(cam, pts3) {                      // world polygon → clipped screen pts + avg cam-z
+  const cp = pts3.map(p => toCam(cam, p[0], p[1], p[2]));
+  const cl = clipNear(cp); if (cl.length < 3) return null;
+  const sp = cl.map(p => { const s = cam.f / p.z; return { x: W / 2 + p.x * s, y: H / 2 + p.y * s }; });
+  return { sp, z: cp.reduce((s, p) => s + p.z, 0) / cp.length };
+}
+function fillPoly3(g, cam, pts3, fill, alpha) {  // filled + 1px self-stroke (no hairline seams)
+  const r = poly3(cam, pts3); if (!r || alpha <= 0) return r;
+  g.save(); g.globalAlpha = alpha; g.beginPath(); g.moveTo(r.sp[0].x, r.sp[0].y);
+  for (let i = 1; i < r.sp.length; i++) g.lineTo(r.sp[i].x, r.sp[i].y); g.closePath();
+  g.fillStyle = fill; g.fill(); g.strokeStyle = fill; g.lineWidth = 1; g.stroke(); g.restore();
+  return r;
+}
+// near-clipped fill with a directional screen-space gradient (dir: 'v','h','d') → soft
+// surface shading + ambient occlusion, so interior planes read as one coherent room.
+function fillPoly3G(g, cam, pts3, c0, c1, dir, alpha) {
+  const r = poly3(cam, pts3); if (!r || alpha <= 0) return r;
+  let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+  for (const p of r.sp) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
+  const lg = dir === 'v' ? g.createLinearGradient(0, minY, 0, maxY)
+    : dir === 'h' ? g.createLinearGradient(minX, 0, maxX, 0)
+    : g.createLinearGradient(minX, minY, maxX, maxY);
+  lg.addColorStop(0, c0); lg.addColorStop(1, c1);
+  g.save(); g.globalAlpha = alpha; g.beginPath(); g.moveTo(r.sp[0].x, r.sp[0].y);
+  for (let i = 1; i < r.sp.length; i++) g.lineTo(r.sp[i].x, r.sp[i].y); g.closePath();
+  g.fillStyle = lg; g.fill(); g.strokeStyle = c1; g.lineWidth = 1; g.stroke(); g.restore();
+  return r;
+}
+// fill an already-projected screen polygon (points array) — for object faces we
+// project ourselves and want a custom gradient between two screen points.
+function fillScreenPoly(g, sp, style, alpha) {
+  if (!sp || sp.length < 3 || alpha <= 0) return;
+  g.save(); g.globalAlpha = alpha; g.beginPath(); g.moveTo(sp[0].x, sp[0].y);
+  for (let i = 1; i < sp.length; i++) g.lineTo(sp[i].x, sp[i].y); g.closePath();
+  g.fillStyle = style; g.fill();
+  if (typeof style === 'string') { g.strokeStyle = style; g.lineWidth = 1; g.stroke(); }
+  g.restore();
+}
+
+// affine mapping from 3 src px corners → 3 dst px corners
+function affine3(s, d) {
+  const x0 = s[0][0], y0 = s[0][1], x1 = s[1][0], y1 = s[1][1], x2 = s[2][0], y2 = s[2][1];
+  const den = (x0 - x2) * (y1 - y2) - (x1 - x2) * (y0 - y2);
+  if (Math.abs(den) < 1e-9) return null;
+  const u0 = d[0].x, u1 = d[1].x, u2 = d[2].x, v0 = d[0].y, v1 = d[1].y, v2 = d[2].y;
+  const a = ((u0 - u2) * (y1 - y2) - (u1 - u2) * (y0 - y2)) / den;
+  const c = ((x0 - x2) * (u1 - u2) - (x1 - x2) * (u0 - u2)) / den;
+  const b = ((v0 - v2) * (y1 - y2) - (v1 - v2) * (y0 - y2)) / den;
+  const dd = ((x0 - x2) * (v1 - v2) - (x1 - x2) * (v0 - v2)) / den;
+  const e = u0 - a * x0 - c * y0, f = v0 - b * x0 - dd * y0;
+  return [a, b, c, dd, e, f];
+}
+
+// perspective-correct texture map: subdivide the screen quad into a grid and
+// affine-map each cell's two triangles from the offscreen UI buffer. Straight UI
+// lines stay straight under perspective, and every pixel shares the screen plane.
+// worldOf(u,v) returns the projected {x,y,ahead} of the screen-plane point at (u,v)∈[0,1].
+function drawTexTri(g, buf, s, d) {                 // s: [[x,y]*3] src px, d: [{x,y}*3] dst px
+  const m = affine3(s, d); if (!m) return;
+  // dilate dst triangle ~0.6px from its centroid so neighbouring cells overlap (no seams)
+  const cxr = (d[0].x + d[1].x + d[2].x) / 3, cyr = (d[0].y + d[1].y + d[2].y) / 3;
+  const D = d.map(p => { const dx = p.x - cxr, dy = p.y - cyr, L = Math.hypot(dx, dy) || 1; return { x: p.x + dx / L * 0.7, y: p.y + dy / L * 0.7 }; });
+  g.save(); g.beginPath(); g.moveTo(D[0].x, D[0].y); g.lineTo(D[1].x, D[1].y); g.lineTo(D[2].x, D[2].y); g.closePath(); g.clip();
+  g.transform(m[0], m[1], m[2], m[3], m[4], m[5]); g.drawImage(buf, 0, 0); g.restore();
+}
+function mapUITextured(g, buf, worldOf, GX, GY) {
+  const P = [];
+  for (let j = 0; j <= GY; j++) { P[j] = []; for (let i = 0; i <= GX; i++) P[j][i] = worldOf(i / GX, j / GY); }
+  const bw = buf.width, bh = buf.height;
+  for (let j = 0; j < GY; j++) for (let i = 0; i < GX; i++) {
+    const a = P[j][i], b = P[j][i + 1], c = P[j + 1][i], e = P[j + 1][i + 1];
+    if (!a.ahead || !b.ahead || !c.ahead || !e.ahead) continue;
+    const x0 = i / GX * bw, x1 = (i + 1) / GX * bw, y0 = j / GY * bh, y1 = (j + 1) / GY * bh;
+    drawTexTri(g, buf, [[x0, y0], [x1, y0], [x0, y1]], [a, b, c]);
+    drawTexTri(g, buf, [[x1, y0], [x1, y1], [x0, y1]], [b, e, c]);
+  }
+}
+// soft radial glow in screen space
+function glow(g, x, y, r, col, a) { if (a <= 0 || r <= 0) return; const rg = g.createRadialGradient(x, y, 0, x, y, r); rg.addColorStop(0, rgba(col, a)); rg.addColorStop(1, rgba(col, 0)); g.fillStyle = rg; g.fillRect(x - r, y - r, r * 2, r * 2); }
+function dotS(g, x, y, r, col, a) { if (a <= 0 || r <= 0) return; g.globalAlpha = a; g.fillStyle = col; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill(); g.globalAlpha = 1; }
+function rrPathC(g, cx, cy, w, h, r) { g.beginPath(); g.roundRect(cx - w / 2, cy - h / 2, w, h, Math.min(r, w / 2, h / 2)); }
+
+/* ---- crown + P glyphs (vector) ------------------------------------------ */
+function crownPath(g, cx, cy, w) {
+  g.beginPath();
+  g.moveTo(cx - 0.50 * w, cy + 0.06 * w);
+  g.lineTo(cx - 0.40 * w, cy - 0.34 * w);
+  g.lineTo(cx - 0.20 * w, cy - 0.10 * w);
+  g.lineTo(cx - 0.00 * w, cy - 0.44 * w);
+  g.lineTo(cx + 0.20 * w, cy - 0.10 * w);
+  g.lineTo(cx + 0.40 * w, cy - 0.34 * w);
+  g.lineTo(cx + 0.50 * w, cy + 0.06 * w);
+  g.closePath();
+}
+function drawCrown(g, cx, cy, w, a, glowOn) {
+  if (a <= 0) return; g.save(); g.globalAlpha = a;
+  if (glowOn) { g.shadowColor = rgba(GOLD, 0.7); g.shadowBlur = w * 0.45; }
+  const lg = g.createLinearGradient(0, cy - 0.5 * w, 0, cy + 0.2 * w);
+  lg.addColorStop(0, SOFTG); lg.addColorStop(1, GOLD);
+  g.fillStyle = lg; crownPath(g, cx, cy, w); g.fill();
+  g.shadowBlur = 0;
+  g.fillStyle = GOLD; g.fillRect(cx - 0.42 * w, cy + 0.10 * w, 0.84 * w, 0.14 * w);
+  g.restore();
+}
+
+/* ============================================================================
+   APP UI — flat texture rendered into uiBuf, morphing across phone/laptop/console
+   layouts, then mapped onto the projected device screen.
+   mL: 0 phone → 1 laptop.   mC: 0 laptop → 1 console.
+   ========================================================================= */
+const STREETS = [
+  [[0.02, 0.34], [0.30, 0.28], [0.55, 0.38], [0.80, 0.30], [0.99, 0.36]],
+  [[0.20, 0.02], [0.26, 0.30], [0.22, 0.58], [0.28, 0.99]],
+  [[0.02, 0.66], [0.34, 0.60], [0.62, 0.68], [0.99, 0.62]],
+  [[0.66, 0.02], [0.60, 0.34], [0.68, 0.66], [0.62, 0.99]],
+  [[0.02, 0.14], [0.40, 0.12], [0.99, 0.17]],
+  [[0.82, 0.04], [0.86, 0.42], [0.82, 0.98]],
+];
+const ROUTE = [[0.16, 0.86], [0.30, 0.68], [0.40, 0.52], [0.56, 0.44], [0.66, 0.30], [0.80, 0.22]];
+// pins: [x,y,gold?]
+const PINS = [[0.66, 0.30, 1], [0.24, 0.24, 0], [0.78, 0.54, 0], [0.40, 0.68, 0], [0.54, 0.42, 0], [0.16, 0.52, 0]];
+
+function drawMap(g, x, y, w, h, r, t, seed) {
+  g.save(); g.beginPath(); g.roundRect(x, y, w, h, r); g.clip();
+  // panel + subtle top sheen / bottom shade
+  g.fillStyle = PANEL; g.fillRect(x, y, w, h);
+  let gg = g.createLinearGradient(0, y, 0, y + h);
+  gg.addColorStop(0, rgba(BRIGHT, 0.05)); gg.addColorStop(0.5, rgba('#ffffff', 0)); gg.addColorStop(1, rgba(INK, 0.5));
+  g.fillStyle = gg; g.fillRect(x, y, w, h);
+  const P = (px, py) => [x + px * w, y + py * h];
+  // streets
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  g.strokeStyle = rgba('#1a2646', 1); g.lineWidth = Math.max(1.5, w * 0.012);
+  for (const st of STREETS) { g.beginPath(); const q0 = P(st[0][0], st[0][1]); g.moveTo(q0[0], q0[1]); for (let i = 1; i < st.length - 1; i++) { const a = P(st[i][0], st[i][1]), b = P(st[i + 1][0], st[i + 1][1]); g.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2); } const ql = P(st[st.length - 1][0], st[st.length - 1][1]); g.lineTo(ql[0], ql[1]); g.stroke(); }
+  // blue route line (glowing) with a soft under-glow
+  g.lineWidth = Math.max(2.4, w * 0.02);
+  g.strokeStyle = rgba(ROYAL, 0.28); g.lineWidth *= 2.4;
+  g.beginPath(); let r0 = P(ROUTE[0][0], ROUTE[0][1]); g.moveTo(r0[0], r0[1]);
+  for (let i = 1; i < ROUTE.length; i++) { const p = P(ROUTE[i][0], ROUTE[i][1]); g.lineTo(p[0], p[1]); } g.stroke();
+  g.lineWidth = Math.max(2.4, w * 0.02);
+  const rgd = g.createLinearGradient(...P(ROUTE[0][0], ROUTE[0][1]), ...P(ROUTE[ROUTE.length - 1][0], ROUTE[ROUTE.length - 1][1]));
+  rgd.addColorStop(0, BRIGHT); rgd.addColorStop(1, SKY);
+  g.strokeStyle = rgd; g.beginPath(); g.moveTo(r0[0], r0[1]);
+  for (let i = 1; i < ROUTE.length; i++) { const p = P(ROUTE[i][0], ROUTE[i][1]); g.lineTo(p[0], p[1]); } g.stroke();
+  // pins
+  const pr = Math.max(4, w * 0.028);
+  for (const [px, py, gold] of PINS) {
+    const p = P(px, py);
+    if (gold) {
+      const pulse = 0.5 + 0.5 * Math.sin(t * 2.0 + seed);
+      glow(g, p[0], p[1], pr * (3.4 + pulse), GOLD, 0.20 + 0.12 * pulse);
+      g.fillStyle = GOLD; g.beginPath(); g.arc(p[0], p[1], pr * 1.35, 0, TAU); g.fill();
+      dotS(g, p[0], p[1], pr * 0.5, '#fff7e8', 0.95);
+    } else {
+      glow(g, p[0], p[1], pr * 2.2, SKY, 0.18);
+      g.fillStyle = SKY; g.beginPath(); g.arc(p[0], p[1], pr, 0, TAU); g.fill();
+      dotS(g, p[0], p[1], pr * 0.42, '#e8f6ff', 0.85);
+    }
+  }
+  g.restore();
+  g.strokeStyle = rgba(EDGE, 0.6); g.lineWidth = 1.5; g.beginPath(); g.roundRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5, r); g.stroke();
+}
+
+function pill(g, x, y, w, h, col, a) { if (a <= 0) return; g.globalAlpha = a; g.fillStyle = col; g.beginPath(); g.roundRect(x, y, w, h, h / 2); g.fill(); g.globalAlpha = 1; }
+
+// render the app into uiBuf at pixel size (bw x bh) matching the current face aspect
+function renderAppUI(bw, bh, mL, mC, t) {
+  uiBuf.width = bw; uiBuf.height = bh; const g = uictx;
+  g.clearRect(0, 0, bw, bh);
+  g.fillStyle = INK; g.fillRect(0, 0, bw, bh);          // screen backing
+  const pad = Math.round(bw * lerp(0.05, 0.03, mL));
+  // ---- top chrome (crown + search + window dots for laptop) ----
+  const topH = Math.round(bh * lerp(0.11, 0.10, mL));
+  const crownX = pad + topH * 0.5, crownY = topH * 0.55, crownW = topH * lerp(0.62, 0.7, mL);
+  // (crown · wordmark · search field · window dots are all drawn as one clean,
+  //  non-overlapping top-chrome block at the END of this function — see below)
+
+  // ---- layout regions: phone(stack) → laptop(left panel+map) → console(map+bottom bar)
+  // left preferences panel width fraction (0 on phone/console, big on laptop)
+  const panelF = lerp(0, 0.34, mL) * (1 - mC * 0.55);
+  const bottomBar = lerp(0.10, 0.0, mL) + mC * 0.14;    // phone home bar / console control bar
+  const mapX = pad + panelF * bw + (panelF > 0 ? pad : 0);
+  const mapY = topH + Math.round(bh * 0.015);
+  const mapW = bw - pad - mapX;
+  const mapH = bh - mapY - pad - bottomBar * bh;
+  const mr = Math.max(8, bw * 0.02);
+
+  // left panel rows (laptop) / stacked list (phone) — fade out on console
+  const listA = (1 - mC);
+  if (panelF > 0.001 || mL < 0.5) {
+    if (mL >= 0.5) { // laptop: rows in left panel
+      const px = pad, pw = panelF * bw, py0 = mapY, ph0 = mapH;
+      g.globalAlpha = listA; g.fillStyle = rgba('#080f26', 1); g.beginPath(); g.roundRect(px, py0, pw, ph0, mr); g.fill(); g.globalAlpha = 1;
+      for (let i = 0; i < 3; i++) {
+        const ry = py0 + pw * 0.06 + i * (ph0 / 3.2), rh = ph0 / 3.9, rw = pw - pw * 0.12, rx = px + pw * 0.06;
+        pill(g, rx, ry, rw, rh, PANEL, 0.9 * listA);
+        dotS(g, rx + rh * 0.5, ry + rh * 0.34, rh * 0.14, i === 0 ? GOLD : SKY, 0.9 * listA);
+        pill(g, rx + rh * 0.9, ry + rh * 0.24, rw * 0.5, rh * 0.14, rgba(HAZE, 1), 0.5 * listA);
+        pill(g, rx + rh * 0.9, ry + rh * 0.5, rw * 0.34, rh * 0.12, rgba(HAZE, 1), 0.3 * listA);
+        pill(g, rx + rw - rh * 1.2, ry + rh * 0.5, rh * 0.9, rh * 0.32, i === 0 ? GOLD : rgba('#16234a', 1), (i === 0 ? 0.95 : 0.8) * listA);
+      }
+    }
+  }
+
+  // map (constant hero element)
+  drawMap(g, mapX, mapY, mapW, mapH, mr, t, 1.3);
+
+  // phone stacked list under the map (fades to laptop panel)
+  const phoneListA = (1 - mL) * (1 - mC);
+  if (phoneListA > 0.01) {
+    for (let i = 0; i < 3; i++) {
+      const ry = mapY + mapH - bh * 0.005 + 6 + i * (bh * 0.075), rh = bh * 0.062, rx = pad, rw = bw - pad * 2;
+      // (drawn just under the map; on phone the map is shorter to leave room)
+    }
+  }
+
+  // bottom control bar (console) / home indicator (phone)
+  if (mC > 0.02) {
+    const by = bh - bottomBar * bh * 0.5, bx = bw * 0.5, bw2 = bw * 0.62, bh2 = bottomBar * bh * 0.62;
+    pill(g, bx - bw2 / 2, by - bh2 / 2, bw2, bh2, rgba('#0b1531', 1), 0.92 * mC);
+    for (let i = 0; i < 5; i++) { const ix = bx - bw2 / 2 + bw2 * (i + 0.5) / 5; dotS(g, ix, by, bh2 * 0.2, i === 2 ? GOLD : HAZE, (i === 2 ? 0.95 : 0.7) * mC); }
+  }
+  const homeA = (1 - mL) * (1 - mC);
+  if (homeA > 0.01) pill(g, bw * 0.5 - bw * 0.14, bh - bh * 0.045, bw * 0.28, Math.max(3, bh * 0.01), rgba(HAZE, 1), 0.35 * homeA);
+
+  // ---- top chrome, laid out left→right with NO overlaps (crown · wordmark · search · dots) ----
+  {
+    const th = topH, cyy = crownY;
+    const wmX = crownX + crownW * 0.78, wmW = crownW * lerp(1.0, 1.35, mL);   // wordmark bar
+    const dotsA = mL * (1 - mC), dotsW = dotsA > 0.01 ? th * 1.5 : 0;
+    const sA = 1 - mC, sX0 = wmX + wmW + th * 0.5, sX1 = bw - pad - dotsW - th * 0.2;  // search field
+    if (sA > 0.01 && sX1 > sX0 + th * 1.2) {
+      pill(g, sX0, cyy - th * 0.26, sX1 - sX0, th * 0.52, rgba('#0e1a36', 1), 0.95 * sA);
+      g.globalAlpha = 0.6 * sA; g.strokeStyle = rgba(EDGE, 1); g.lineWidth = 1.5; g.beginPath(); g.roundRect(sX0, cyy - th * 0.26, sX1 - sX0, th * 0.52, th * 0.26); g.stroke(); g.globalAlpha = 1;
+      dotS(g, sX0 + th * 0.32, cyy, th * 0.13, HAZE, 0.85 * sA);                 // search icon
+      pill(g, sX0 + th * 0.62, cyy - th * 0.05, (sX1 - sX0) * 0.42, th * 0.1, rgba(HAZE, 1), 0.32 * sA); // query
+    }
+    if (dotsW > 0) { const dx = bw - pad - th * 0.32; dotS(g, dx, cyy, th * 0.12, HAZE, 0.7 * dotsA); dotS(g, dx - th * 0.42, cyy, th * 0.12, HAZE, 0.7 * dotsA); dotS(g, dx - th * 0.84, cyy, th * 0.12, SOFTG, 0.85 * dotsA); }
+    pill(g, wmX, cyy - th * 0.055, wmW, th * 0.11, rgba(HAZE, 1), 0.42);         // muted wordmark (no overlap)
+    drawCrown(g, crownX, cyy, crownW, 1, false);
+  }
+}
+
+/* ============================================================================
+   DEVICE — a thin 3D rounded slab (phone → laptop → console) with the app on
+   its front face. Placed at world Z ~ DEV_Z (the focal object / dashboard).
+   ========================================================================= */
+const DEV_Z = 1000, DEV_X = 30, DEV_Y = -8;
+const PHONE = { w: 66, h: 134, r: 14, th: 8 };
+const LAPTOP = { w: 274, h: 168, r: 10, th: 7 };
+const CONSOLE = { w: 156, h: 92, r: 8, th: 11 };
+
+function deviceState(t) {
+  // mL phone→laptop across B2; mC laptop→console across B3
+  const mL = seg(t, 2.66, 5.5, easeMorph);
+  const mC = seg(t, 5.9, 8.2, easeMorph);
+  const w = lerp(lerp(PHONE.w, LAPTOP.w, mL), CONSOLE.w, mC);
+  const h = lerp(lerp(PHONE.h, LAPTOP.h, mL), CONSOLE.h, mC);
+  const r = lerp(lerp(PHONE.r, LAPTOP.r, mL), CONSOLE.r, mC);
+  const th = lerp(lerp(PHONE.th, LAPTOP.th, mL), CONSOLE.th, mC);
+  // 3/4 yaw: phone slightly turned, easing toward frontal as it becomes the console
+  const yaw = lerp(-13, -5, mL) * (1 - mC) * D2R + (-2 * mC) * D2R;
+  // console mounts slightly right + a touch lower into the dash
+  const cx = DEV_X + lerp(0, 26, mC), cy = DEV_Y + lerp(0, 30, mC);
+  const bob = Math.sin(t * 0.7 + 1) * 2.4 * (1 - mC);   // gentle float, stops when mounted
+  return { mL, mC, w, h, r, th, yaw, cx, cy: cy + bob, cz: DEV_Z };
+}
+
+function drawDevice(cam, t, alpha) {
+  if (alpha <= 0.003) return;
+  const d = deviceState(t);
+  const o = { cx: d.cx, cy: d.cy, yaw: d.yaw, cz: d.cz };
+  // materialize scale (never from 0 — start at 0.95)
+  const mat = seg(t, 0.1, 0.9, easeLux);
+  const sc = lerp(0.955, 1, mat), aa = alpha * lerp(0.0, 1, seg(t, 0.05, 0.55, easeLux));
+  const w = d.w * sc, h = d.h * sc;
+  const g = ctx;
+
+  // front (toward camera, -th/2) & back (+th/2) outlines
+  const bodyOut = rrOutline(w, h, d.r);
+  const front = placeOutline(cam, bodyOut, o, -d.th / 2);
+  const back = placeOutline(cam, bodyOut, o, d.th / 2);
+  if (!front.ahead) return;
+
+  // ambient screen glow behind device
+  const cP = project(cam, o.cx, o.cy, o.cz);
+  glow(g, cP.x, cP.y, Math.max(w, h) * cP.scale * 1.1, ROYAL, 0.06 * aa);
+
+  // laptop base deck → dashboard cowl is drawn separately (drawCowl). Here: slab.
+  g.save(); g.globalAlpha = aa;
+  // extruded side walls (painter-sorted) give real thinness at the 3/4 angle
+  const walls = [];
+  for (let i = 0; i < front.pts.length; i++) {
+    const j = (i + 1) % front.pts.length;
+    const P = [front.pts[i], front.pts[j], back.pts[j], back.pts[i]];
+    walls.push({ P, z: avgZ(P) });
+  }
+  walls.sort((a, b) => b.z - a.z);
+  for (const wl of walls) quad(g, wl.P, INK, 1);
+  // front chassis face — brushed navy metal
+  pathPts(g, front.pts);
+  const bb = { x0: cP.x - w * cP.scale, y0: cP.y - h * cP.scale, x1: cP.x + w * cP.scale, y1: cP.y + h * cP.scale };
+  let mg = g.createLinearGradient(bb.x0, bb.y0, bb.x1, bb.y1);
+  mg.addColorStop(0, STEELHI); mg.addColorStop(0.35, STEEL); mg.addColorStop(1, NAVY2);
+  g.fillStyle = mg; g.fill();
+  // rim light (upper-left), thin — never a large bright area
+  g.save(); pathPts(g, front.pts); g.clip();
+  g.strokeStyle = rgba('#bcd0f2', 0.34); g.lineWidth = 1.6; pathPts(g, front.pts); g.stroke();
+  g.restore();
+  g.globalAlpha = 1; g.restore();
+
+  // screen face (inset) + app texture mapped on
+  const inset = lerp(6, 10, d.mL) * sc;
+  const sw = w - inset * 2, sh = h - inset * 2;
+  const scrOut = rrOutline(sw, sh, Math.max(2, d.r - inset * 0.5));
+  const scr = placeOutline(cam, scrOut, o, -d.th / 2 - 0.2);
+  if (!scr.ahead) return;
+  // corners of the screen for the affine map (local rect at plane)
+  const cyw = Math.cos(o.yaw), syw = Math.sin(o.yaw), lz = -d.th / 2 - 0.2;
+  const cW = (lx, ly) => project(cam, lx * cyw + lz * syw + o.cx, ly + o.cy, -lx * syw + lz * cyw + o.cz);
+  const TL = cW(-sw / 2, -sh / 2), TR = cW(sw / 2, -sh / 2), BL = cW(-sw / 2, sh / 2);
+  // render app to the offscreen buffer at a resolution matched to its on-screen span
+  const spanPx = Math.hypot(TR.x - TL.x, TR.y - TL.y);
+  const bw = Math.min(1280, Math.max(240, Math.round(spanPx * 1.3))), bh = Math.round(bw * (sh / sw));
+  renderAppUI(bw, bh, d.mL, d.mC, t);
+  g.save(); g.globalAlpha = aa;
+  pathPts(g, scr.pts); g.clip();          // rounded screen outline (intersected with each cell)
+  g.fillStyle = INK; g.fill();
+  g.imageSmoothingEnabled = true;
+  // perspective quad map: every UI pixel shares the screen's exact tilted 3D plane
+  const worldOf = (u, v) => cW((u - 0.5) * sw, (v - 0.5) * sh);
+  const GX = spanPx > 520 ? 10 : spanPx > 260 ? 7 : 4, GY = Math.max(4, Math.round(GX * (sh / sw)));
+  mapUITextured(g, uiBuf, worldOf, GX, GY);
+  // glass sheen (subtle, top third)
+  const sg = g.createLinearGradient(TL.x, TL.y, BL.x, BL.y);
+  sg.addColorStop(0, rgba('#ffffff', 0.06)); sg.addColorStop(0.35, rgba('#ffffff', 0)); sg.addColorStop(1, rgba('#ffffff', 0));
+  g.fillStyle = sg; pathPts(g, scr.pts); g.fill();
+  g.restore();
+  // inner bezel
+  g.strokeStyle = rgba(INK, 0.9); g.lineWidth = 2.4; g.globalAlpha = aa; pathPts(g, scr.pts); g.stroke(); g.globalAlpha = 1;
+
+  // edge glint — a small local specular sweep along the top edge (B1 only, subtle)
+  const gp = bell(ph(t, 0.7, 1.9));
+  if (gp > 0.01 && d.mC < 0.02) {
+    const u = ph(t, 0.7, 1.9);
+    const a0 = front.pts[Math.floor(lerp(front.pts.length * 0.66, front.pts.length * 0.92, u))];
+    g.save(); g.globalCompositeOperation = 'lighter';
+    glow(g, a0.x, a0.y, 46 * cP.scale * 6, '#cfe0ff', 0.12 * gp);
+    g.restore();
+  }
+}
+
+/* ============================================================================
+   DASHBOARD COWL — the laptop deck widens/curves into the dash. Grows in B3.
+   ========================================================================= */
+function drawCowl(cam, t, aInterior, mC, mL) {
+  // presence: as a laptop base deck (mL, before console) then broadens into cowl (mC)
+  const deckA = mL * (1 - mC);
+  const cowlA = mC;
+  const a = clamp01(aInterior * (deckA * 0.9 + cowlA));
+  if (a <= 0.01) return;
+  const g = ctx;
+  // width & curvature interpolate from a small laptop deck to a wide dash cowl
+  const halfW = lerp(150, 1150, cowlA);
+  const frontZ = DEV_Z - lerp(70, 60, cowlA);   // just in front of the screen
+  const backZ = DEV_Z + lerp(30, 40, cowlA);
+  const topY = DEV_Y + lerp(70, 66, cowlA);      // top lip near the screen base
+  const dropY = topY + lerp(60, 240, cowlA);     // sweeps down toward the driver
+  // build the cowl as a strip of quads across X with a curved (bezier) top edge
+  const N = 26, cols = [];
+  for (let i = 0; i <= N; i++) {
+    const u = i / N, x = lerp(-halfW, halfW, u);
+    const brow = Math.pow(Math.sin(u * Math.PI), 0.7);      // raised brow in the middle
+    const yT = topY - brow * lerp(6, 54, cowlA);
+    const zc = lerp(frontZ, backZ, brow * cowlA * 0.5 + (1 - cowlA) * 0);
+    cols.push({ xT: DEV_X + x, yT, zT: zc, yB: dropY + (1 - brow) * 30, zB: frontZ });
+  }
+  // painter: quads far→near
+  const quads = [];
+  for (let i = 0; i < N; i++) {
+    const c0 = cols[i], c1 = cols[i + 1];
+    const P = projQuad(cam, [c0.xT, c0.yT, c0.zT], [c1.xT, c1.yT, c1.zT], [c1.xT, c1.yB, c1.zB], [c0.xT, c0.yB, c0.zB]);
+    if (P.every(p => p.ahead)) quads.push({ P, z: avgZ(P), u: i / N });
+  }
+  quads.sort((x, y) => y.z - x.z);
+  for (const q of quads) {
+    const shade = mix(NAVY2, STEEL, 0.25 + 0.2 * Math.sin(q.u * Math.PI));
+    quad(g, q.P, shade, a);
+  }
+  // warm-cool top rim highlight along the brow (thin line, low alpha)
+  g.save(); g.globalAlpha = a * 0.5; g.strokeStyle = rgba(HAZE, 0.5); g.lineWidth = 2; g.lineJoin = 'round';
+  g.beginPath(); for (let i = 0; i <= N; i++) { const c = cols[i]; const p = project(cam, c.xT, c.yT - 2, c.zT); if (i === 0) g.moveTo(p.x, p.y); else g.lineTo(p.x, p.y); } g.stroke();
+  g.globalAlpha = a * 0.25; g.strokeStyle = rgba(GOLD, 0.4); g.lineWidth = 1.6; g.stroke();
+  g.restore();
+  // soft screen light spill onto the cowl
+  const cP = project(cam, DEV_X, DEV_Y + 60, DEV_Z - 40);
+  glow(g, cP.x, cP.y + 30 * cP.scale, 300 * cP.scale, ROYAL, 0.05 * a);
+}
+
+/* ============================================================================
+   CABIN — windshield light, A-pillars, steering wheel, seats, rear bench,
+   side panels, rear window. Materializes in B3, we fly through it in B4.
+   nearFade dissolves each element right as the camera passes its plane.
+   ========================================================================= */
+function nearFade(objZ, cam, start, end) { const d = objZ - cam.pz; return clamp01((d - end) / (start - end)); }
+
+// ---- enclosed cabin extents; surfaces are flown through with near-plane clipping ----
+const CAB = {
+  halfW: 300, roofY: -200, floorY: 220, beltY: 52, dashY: 62,
+  rearZ: 150, frontZ: 1120, bZ: 600, cZ: 212,
+};
+// windshield glass — a dim COOL-lit trapezoid at the front of the cabin (never bright)
+function drawWindshield(cam, t, a) {
+  if (a <= 0.01) return; const g = ctx; const C = CAB, z = C.frontZ, hw = C.halfW - 10;
+  const r = poly3(cam, [[DEV_X - hw, C.roofY + 10, z], [DEV_X + hw, C.roofY + 10, z], [DEV_X + hw - 34, C.dashY, z - 26], [DEV_X - hw + 34, C.dashY, z - 26]]);
+  if (!r) return;
+  g.save(); g.beginPath(); g.moveTo(r.sp[0].x, r.sp[0].y); for (let i = 1; i < r.sp.length; i++) g.lineTo(r.sp[i].x, r.sp[i].y); g.closePath(); g.clip();
+  const cP = project(cam, DEV_X, C.roofY + 70, z);
+  const bx = cP.ahead ? cP.x : W / 2, by = cP.ahead ? cP.y : H * 0.36, sc = cP.ahead ? cP.scale : 0.4;
+  const lg = g.createLinearGradient(0, by - 200, 0, by + 340);
+  lg.addColorStop(0, rgba('#1c2e54', 0.92 * a)); lg.addColorStop(0.55, rgba('#0d1633', 0.85 * a)); lg.addColorStop(1, rgba(NAVY, 0.6 * a));
+  g.fillStyle = lg; g.fillRect(0, 0, W, H);
+  glow(g, bx + 140, by + 70, 560 * sc, SKY, 0.09 * a);
+  glow(g, bx - 260, by + 90, 400 * sc, HAZE, 0.05 * a);
+  g.restore();
+}
+
+function drawWheel(cam, t, a) {
+  if (a <= 0.01) return; const g = ctx;
+  const wx = DEV_X - 232, wy = DEV_Y + 196, wz = DEV_Z - 128, R = 158;   // inside the cabin, before the driver
+  const cP = project(cam, wx, wy, wz); if (!cP.ahead) return;
+  const rr = R * cP.scale;
+  g.save();
+  g.strokeStyle = rgba('#0a1024', 0.96); g.lineWidth = 34 * cP.scale; g.lineCap = 'round';
+  g.beginPath(); g.ellipse(cP.x, cP.y, rr, rr * 0.62, 0, Math.PI * 0.05, Math.PI * 0.95); g.stroke();
+  g.beginPath(); g.ellipse(cP.x, cP.y, rr, rr * 0.62, 0, Math.PI * 1.08, Math.PI * 1.92); g.stroke();
+  g.strokeStyle = rgba(HAZE, 0.14); g.lineWidth = 3; g.beginPath(); g.ellipse(cP.x, cP.y, rr - 14 * cP.scale, rr * 0.62 - 10 * cP.scale, 0, Math.PI * 1.15, Math.PI * 1.6); g.stroke();
+  // hub
+  dotS(g, cP.x, cP.y + rr * 0.1, rr * 0.16, '#0a1024', a); dotS(g, cP.x, cP.y + rr * 0.1, rr * 0.05, GOLD, 0.5 * a);
+  g.restore();
+}
+
+// front seat as a TRUE 3-D VOLUME (backrest slab + headrest block, reclined), projected
+// through the scene camera so it foreshortens/scales correctly as the camera recedes.
+// Upholstery read: 2–3 tone gradients + a centre crease, side bolsters and quilt seams.
+const SEAT_Z = 640;
+function drawSeat3D(cam, side, a, t) {
+  if (a <= 0.01) return; const g = ctx; const C = CAB;
+  const cx = DEV_X + side * 126, cz = SEAT_Z;
+  const nf = nearFade(cz, cam, 270, 48); const aa = a * nf; if (aa <= 0.01) return;
+  const near = cz - cam.pz; if (near <= 42) return;
+  const dof = clamp01((150 - near) / 150) * 4;              // faint DOF only when very close
+  const hbw = 94, ihw = -side * hbw, dep = 46;              // inner side faces the console
+  const yBT = -38, yBB = C.floorY - 6, yHT = -98, yHB = -30, hhw = 64, ihh = -side * hhw;
+  const zT = cz - 34, zB = cz - 6;                          // recline: top leans toward camera
+  const F = [];
+  const add = (pts3, drawFn) => { const r = poly3(cam, pts3); if (r) F.push({ z: r.z, sp: r.sp, draw: drawFn }); };
+  const spanY = sp => { let a2 = 1e9, b = -1e9; for (const p of sp) { if (p.y < a2) a2 = p.y; if (p.y > b) b = p.y; } return [a2, b]; };
+  const spanX = sp => { let a2 = 1e9, b = -1e9; for (const p of sp) { if (p.x < a2) a2 = p.x; if (p.x > b) b = p.x; } return [a2, b]; };
+
+  // backrest inner side (depth) — lit by the console
+  add([[cx + ihw, yBT, zT], [cx + ihw, yBT, zT + dep], [cx + ihw, yBB, zB + dep], [cx + ihw, yBB, zB]], sp => fillScreenPoly(g, sp, mix(STEEL, STEELHI, 0.42), aa));
+  // backrest top sliver
+  add([[cx - hbw, yBT, zT], [cx + hbw, yBT, zT], [cx + hbw, yBT, zT + dep], [cx - hbw, yBT, zT + dep]], sp => fillScreenPoly(g, sp, mix(NAVY2, STEEL, 0.36), aa));
+  // backrest rear face (main) — diagonal 2–3 tone gradient, inner-upper lit
+  add([[cx - hbw, yBT, zT], [cx + hbw, yBT, zT], [cx + hbw, yBB, zB], [cx - hbw, yBB, zB]], sp => {
+    const [x0, x1] = spanX(sp), [y0, y1] = spanY(sp);
+    const lx = side < 0 ? x1 : x0;                         // inner edge on screen
+    const lg = g.createLinearGradient(side < 0 ? x0 : x1, y1, lx, y0);
+    lg.addColorStop(0, mix(INK, NAVY2, 0.5)); lg.addColorStop(0.5, mix(NAVY2, STEEL, 0.22)); lg.addColorStop(1, mix(STEEL, STEELHI, 0.5));
+    fillScreenPoly(g, sp, lg, aa);
+  });
+  // headrest: inner side, top, rear face
+  const zHT = cz - 38, zHB = cz - 24;
+  add([[cx + ihh, yHT, zHT], [cx + ihh, yHT, zHT + 44], [cx + ihh, yHB, zHB + 44], [cx + ihh, yHB, zHB]], sp => fillScreenPoly(g, sp, mix(STEEL, STEELHI, 0.32), aa));
+  add([[cx - hhw, yHT, zHT], [cx + hhw, yHT, zHT], [cx + hhw, yHT, zHT + 44], [cx - hhw, yHT, zHT + 44]], sp => fillScreenPoly(g, sp, mix(NAVY2, STEEL, 0.4), aa));
+  add([[cx - hhw, yHT, zHT], [cx + hhw, yHT, zHT], [cx + hhw, yHB, zHB], [cx - hhw, yHB, zHB]], sp => {
+    const [y0, y1] = spanY(sp); const lg = g.createLinearGradient(0, y0, 0, y1);
+    lg.addColorStop(0, mix(NAVY2, STEEL, 0.42)); lg.addColorStop(1, mix(NAVY2, STEEL, 0.2)); fillScreenPoly(g, sp, lg, aa);
+  });
+
+  g.save(); if (dof > 0.6) g.filter = 'blur(' + dof.toFixed(1) + 'px)';
+  F.sort((p, q) => q.z - p.z);                             // far faces first
+  for (const f of F) f.draw(f.sp);
+  // upholstery seams on the reclined rear plane (≥1.6px, round caps)
+  const rf = (u, v) => [cx + u * hbw, lerp(yBT, yBB, v), lerp(zT, zB, v)];
+  const seam = (pa, pb, col, w, al) => { const A = project(cam, ...pa), B = project(cam, ...pb); if (A.ahead && B.ahead) { g.globalAlpha = al * aa; g.strokeStyle = col; g.lineWidth = Math.max(1.6, w); g.beginPath(); g.moveTo(A.x, A.y); g.lineTo(B.x, B.y); g.stroke(); } };
+  seam(rf(0, 0.06), rf(0, 0.94), rgba(INK, 0.75), 2.2, 0.6);
+  seam(rf(-0.52, 0.05), rf(-0.52, 0.93), rgba(STEELHI, 0.2), 2, 0.4);
+  seam(rf(0.52, 0.05), rf(0.52, 0.93), rgba(STEELHI, 0.2), 2, 0.4);
+  seam(rf(-0.9, 0.3), rf(0.9, 0.3), rgba(INK, 0.55), 1.8, 0.5);
+  seam(rf(-0.9, 0.62), rf(0.9, 0.62), rgba(INK, 0.55), 1.8, 0.5);
+  g.globalAlpha = 1; g.filter = 'none'; g.restore();
+  // contact AO where the seat base meets the floor
+  const baseP = project(cam, cx, yBB, cz + 10);
+  if (baseP.ahead) { g.save(); g.globalCompositeOperation = 'multiply'; g.translate(baseP.x, baseP.y); g.scale(1, 0.28); glow(g, 0, 0, 150 * baseP.scale, '#01030a', 0.5 * aa); g.restore(); }
+}
+
+// full interior ENCLOSURE — headliner, floor, console spine, doors + glass, A/B/C pillars,
+// dash wall + windshield — every surface real projected geometry with directional gradient
+// shading + ambient occlusion, near-plane-clipped so the walls pass the camera correctly.
+function drawCabinShell(cam, t, aI) {
+  const g = ctx; const C = CAB, hw = C.halfW, X = DEV_X;
+  const F = (pts, fill, al) => fillPoly3(g, cam, pts, fill, (al == null ? 1 : al) * aI);
+  const G = (pts, c0, c1, dir, al) => fillPoly3G(g, cam, pts, c0, c1, dir, (al == null ? 1 : al) * aI);
+
+  // 0) interior backdrop + corner ambient-occlusion (guarantees no stage background leaks)
+  g.save(); g.globalAlpha = aI; g.fillStyle = '#05091a'; g.fillRect(0, 0, W, H);
+  const ao = g.createRadialGradient(W * 0.5, H * 0.5, H * 0.15, W * 0.5, H * 0.54, W * 0.66);
+  ao.addColorStop(0, rgba('#0c1430', 0)); ao.addColorStop(1, rgba(INK, 0.95));
+  g.fillStyle = ao; g.fillRect(0, 0, W, H); g.restore();
+
+  // 1) headliner — subtle depth gradient (far/front darker)
+  G([[X - hw, C.roofY, C.rearZ], [X + hw, C.roofY, C.rearZ], [X + hw, C.roofY, C.frontZ], [X - hw, C.roofY, C.frontZ]], '#080e20', '#04060f', 'v');
+  // 2) floor — lifts toward the near/console (glow), darker into the front footwell
+  G([[X - hw, C.floorY, C.rearZ], [X + hw, C.floorY, C.rearZ], [X + hw, C.floorY, C.frontZ], [X - hw, C.floorY, C.frontZ]], '#0a1226', '#05091a', 'v');
+  // 3) center console spine (raised, between the seats, up to the dash)
+  const kz0 = 700, kz1 = C.frontZ - 46, ky = C.beltY + 46;
+  G([[X - 70, ky, kz0], [X + 70, ky, kz0], [X + 70, ky, kz1], [X - 70, ky, kz1]], '#0e1832', '#0a1124', 'v');
+  F([[X - 70, ky, kz0], [X - 70, C.floorY, kz0], [X - 70, C.floorY, kz1], [X - 70, ky, kz1]], '#070c1c');
+  F([[X + 70, ky, kz0], [X + 70, C.floorY, kz0], [X + 70, C.floorY, kz1], [X + 70, ky, kz1]], '#04081a');
+  // 4) side walls, far (right) then near (left): glass (lit near belt) + door card (footwell AO) + armrest
+  for (const sx of [X + hw, X - hw]) {
+    G([[sx, C.roofY + 14, C.rearZ], [sx, C.roofY + 14, C.frontZ], [sx, C.beltY, C.frontZ], [sx, C.beltY, C.rearZ]], '#101d34', '#1c2f4b', 'v', 0.94);
+    G([[sx, C.beltY, C.rearZ], [sx, C.beltY, C.frontZ], [sx, C.floorY, C.frontZ], [sx, C.floorY, C.rearZ]], '#0b1226', '#04081a', 'v');
+    F([[sx, C.beltY + 22, 470], [sx, C.beltY + 22, 1000], [sx, C.beltY + 48, 1000], [sx, C.beltY + 48, 470]], '#0d1530');
+  }
+  // 5) dashboard front wall (below the windshield)
+  G([[X - hw, C.dashY, 1010], [X + hw, C.dashY, 1010], [X + hw, C.floorY, 1010], [X - hw, C.floorY, 1010]], '#0a1224', '#05091a', 'v');
+  // 6) windshield glass + roof header band
+  drawWindshield(cam, t, aI * 0.95);
+  F([[X - hw, C.roofY, C.frontZ], [X + hw, C.roofY, C.frontZ], [X + hw, C.roofY + 24, C.frontZ], [X - hw, C.roofY + 24, C.frontZ]], '#04060f');
+  // 7) pillars over the glass: A (front, angled), B (mid), C (rear) — pass beside us
+  for (const sx of [X + hw, X - hw]) {
+    const dir = sx > X ? -1 : 1;
+    F([[sx, C.roofY, C.frontZ], [sx + dir * 46, C.dashY, C.frontZ - 28], [sx + dir * 80, C.dashY, C.frontZ - 28], [sx + dir * 34, C.roofY, C.frontZ]], '#0a1024');
+    G([[sx, C.roofY + 8, C.bZ - 24], [sx, C.roofY + 8, C.bZ + 24], [sx, C.beltY, C.bZ + 24], [sx, C.beltY, C.bZ - 24]], '#0c1430', '#080e22', 'v');
+    G([[sx, C.roofY + 8, C.cZ - 24], [sx, C.roofY + 8, C.cZ + 24], [sx, C.beltY, C.cZ + 24], [sx, C.beltY, C.cZ - 24]], '#0c1430', '#080e22', 'v');
+  }
+  // console light spill onto the dash (soft warm-cool local light, dim)
+  const spill = project(cam, X, C.dashY - 8, 1000);
+  if (spill.ahead) { glow(g, spill.x, spill.y, 360 * spill.scale, ROYAL, 0.055 * aI); glow(g, spill.x, spill.y - 40 * spill.scale, 200 * spill.scale, SKY, 0.02 * aI); }
+}
+function drawCabin(cam, t, aInterior, dev) {
+  drawCabinShell(cam, t, aInterior);
+  drawCowl(cam, t, aInterior, dev.mC, dev.mL);   // dashboard cowl detail over the dash wall
+  // (device/console is drawn between the cowl and the seats by the master seek)
+}
+function drawCabinNear(cam, t, aInterior) {
+  drawWheel(cam, t, aInterior * seg(t, 6.2, 7.8, easeLux));
+  const seatA = aInterior * seg(t, 6.6, 8.0, easeLux);
+  for (const side of [1, -1]) drawSeat3D(cam, side, seatA, t);   // far (right) seat first, near (left) on top
+}
+
+/* ============================================================================
+   CAR EXTERIOR — rear 3/4 view. Built from projected quads, painter-sorted.
+   Reveals as we emerge behind the car (B4 late), present through B5's fold.
+   ========================================================================= */
+const CAR = {
+  rearZ: 40, frontZ: 1180, hw: 236, hwTop: 198,
+  sill: 176, belt: 44, roof: -118, glassTop: -96,
+  greenRear: 310, greenFront: 900,
+};
+function carXform(t) {
+  // eases slowly forward down the lane in B5, then folds flat into the bay
+  const zOff = seg(t, 12.3, 14.0, easeLux) * 66;             // creeps forward
+  const fold = seg(t, 12.9, 14.6, easeMorph);                // 0 solid → 1 flat
+  return { zOff, fold };
+}
+// fold maps a world Y toward the ground plane (flatten panels down into the bay)
+function foldY(y, fold) { return lerp(y, CAR.sill, fold); }
+
+function drawCar(cam, t, a) {
+  if (a <= 0.01) return; const g = ctx;
+  const X = carXform(t), fold = X.fold;
+  const zf = CAR.rearZ + X.zOff, zF = CAR.frontZ + X.zOff, zGR = CAR.greenRear + X.zOff, zGF = CAR.greenFront + X.zOff;
+  const bodyA = a * (1 - fold);                              // panels dissolve as they flatten
+  const glassA = a * (1 - fold);
+  const FY = y => foldY(y, fold);
+  const hw = CAR.hw, hwT = CAR.hwTop, belt = CAR.belt, sill = CAR.sill, roof = CAR.roof, gtop = CAR.glassTop;
+
+  // ground contact shadow first — soft ellipse pinned under the car (never detached)
+  const shP = project(cam, -6, sill + 4, zf + 230);
+  if (shP.ahead) {
+    g.save(); g.globalCompositeOperation = 'multiply'; g.translate(shP.x, shP.y); g.scale(1, 0.3);
+    const r = (380 + 80 * fold) * shP.scale, rg = g.createRadialGradient(0, 0, 0, 0, 0, r);
+    rg.addColorStop(0, rgba('#000206', 0.6 * a)); rg.addColorStop(0.7, rgba('#000206', 0.28 * a)); rg.addColorStop(1, rgba('#000206', 0));
+    g.fillStyle = rg; g.beginPath(); g.arc(0, 0, r, 0, TAU); g.fill(); g.restore();
+  }
+
+  const faces = [];
+  const add = (pA, fill, al, stroke) => { const P = projQuad(cam, pA[0], pA[1], pA[2], pA[3]); if (P.every(p => p.ahead)) faces.push({ P, fill, a: al, z: avgZ(P), stroke, i: faces.length }); };
+
+  // roof
+  add([[-hwT, FY(roof), zGR], [hwT, FY(roof), zGR], [hwT, FY(roof), zGF], [-hwT, FY(roof), zGF]], mix(NAVY2, STEEL, 0.22), bodyA);
+  // left & right lower body sides
+  add([[-hw, FY(belt), zf], [-hw, FY(belt), zF], [-hw, FY(sill), zF], [-hw, FY(sill), zf]], mix(NAVY2, '#0f1a3a', 0.7), bodyA);
+  add([[hw, FY(belt), zf], [hw, FY(belt), zF], [hw, FY(sill), zF], [hw, FY(sill), zf]], mix(NAVY2, '#0c142e', 0.55), bodyA);
+  // greenhouse side windows (dark) following the roofline
+  add([[-hw, FY(gtop + 8), zGR], [-hwT, FY(roof + 6), zGR + 20], [-hwT, FY(roof + 6), zGF - 40], [-hw, FY(belt + 4), zGF]], rgba('#0a1226', 0.9), glassA);
+  // rear deck (trunk lid) — top surface from glass base back to tail
+  add([[-hw, FY(belt), zf], [hw, FY(belt), zf], [hwT, FY(belt - 4), zGR], [-hwT, FY(belt - 4), zGR]], mix(NAVY2, '#0d1836', 0.65), bodyA);
+  // cabin seen THROUGH the rear glass (a real interior, not a void): parcel shelf + two headrests
+  add([[-hwT + 20, FY(belt - 10), zGR + 70], [hwT - 20, FY(belt - 10), zGR + 70], [hwT - 30, FY(belt - 4), zGR + 30], [-hwT + 30, FY(belt - 4), zGR + 30]], mix(INK, NAVY2, 0.4), bodyA * 0.85);
+  for (const hx of [-98, 98]) add([[hx - 56, FY(gtop + 24), zGR + 52], [hx + 56, FY(gtop + 24), zGR + 52], [hx + 56, FY(belt - 12), zGR + 52], [hx - 56, FY(belt - 12), zGR + 52]], mix(INK, NAVY2, 0.58), bodyA * 0.9);
+  // rear glass (sloped, dark tint) — drawn over the interior, so it reads through the tint
+  add([[-hwT, FY(gtop), zGR], [hwT, FY(gtop), zGR], [hw * 0.94, FY(belt - 2), zf + 36], [-hw * 0.94, FY(belt - 2), zf + 36]], rgba('#0b1428', 0.9), glassA);
+  // rear face (hatch/bumper) facing the camera
+  add([[-hw, FY(belt), zf], [hw, FY(belt), zf], [hw, FY(sill), zf], [-hw, FY(sill), zf]], mix('#101c3e', NAVY2, 0.35), bodyA, rgba(EDGE, 0.5));
+
+  faces.sort((p, q) => (q.z - p.z) || (p.i - q.i));   // stable: depth, then insertion order (no z-pop)
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  for (const fc of faces) {
+    if (fc.a <= 0.002) continue;
+    // fill + a 1px self-stroke of the SAME colour so adjacent faces overlap ~0.5px (no hairline seams)
+    g.save(); g.globalAlpha = fc.a;
+    g.beginPath(); g.moveTo(fc.P[0].x, fc.P[0].y); g.lineTo(fc.P[1].x, fc.P[1].y); g.lineTo(fc.P[2].x, fc.P[2].y); g.lineTo(fc.P[3].x, fc.P[3].y); g.closePath();
+    g.fillStyle = fc.fill; g.fill(); g.strokeStyle = fc.fill; g.lineWidth = 1; g.stroke();
+    g.restore();
+    if (fc.stroke) { g.save(); g.globalAlpha = fc.a; g.strokeStyle = fc.stroke; g.lineWidth = 1.6; g.beginPath(); g.moveTo(fc.P[0].x, fc.P[0].y); g.lineTo(fc.P[1].x, fc.P[1].y); g.lineTo(fc.P[2].x, fc.P[2].y); g.lineTo(fc.P[3].x, fc.P[3].y); g.closePath(); g.stroke(); g.restore(); }
+  }
+
+  // shoulder highlight along the top of the rear face (thin)
+  g.save(); g.globalAlpha = bodyA * 0.45; g.strokeStyle = rgba(HAZE, 0.4); g.lineWidth = 2;
+  const s0 = project(cam, -hw + 10, FY(belt + 3), zf), s1 = project(cam, hw - 10, FY(belt + 3), zf);
+  if (s0.ahead && s1.ahead) { g.beginPath(); g.moveTo(s0.x, s0.y); g.lineTo(s1.x, s1.y); g.stroke(); } g.restore();
+
+  // taillights — two rounded warm red-amber lamps + a slim connecting strip
+  const tlA = a * (1 - fold);
+  const tly = FY(belt + 42), tz = zf - 1.5;
+  for (const side of [-1, 1]) {
+    const tx = side * (hw - 64);
+    const cP = project(cam, tx, tly, tz); if (!cP.ahead) continue;
+    const lw = 48 * cP.scale, lh = 16 * cP.scale;
+    glow(g, cP.x, cP.y, 50 * cP.scale, TAILLHI, 0.38 * tlA);
+    g.save(); g.globalAlpha = tlA;
+    const lg = g.createLinearGradient(cP.x, cP.y - lh, cP.x, cP.y + lh); lg.addColorStop(0, TAILLHI); lg.addColorStop(1, TAILL);
+    g.fillStyle = lg; g.beginPath(); g.roundRect(cP.x - lw, cP.y - lh, lw * 2, lh * 2, lh * 0.7); g.fill();
+    g.fillStyle = rgba('#ffcf9e', 0.45); g.beginPath(); g.roundRect(cP.x - lw * 0.72, cP.y - lh * 0.36, lw * 1.44, lh * 0.72, lh * 0.4); g.fill();
+    g.globalAlpha = 1; g.restore();
+  }
+  const cs0 = project(cam, -(hw - 64) + 48, tly, tz), cs1 = project(cam, (hw - 64) - 48, tly, tz);
+  if (cs0.ahead && cs1.ahead) { g.save(); g.globalAlpha = tlA * 0.5; g.strokeStyle = rgba(TAILL, 0.7); g.lineWidth = Math.max(1.5, 5 * project(cam, 0, tly, tz).scale); g.lineCap = 'round'; g.beginPath(); g.moveTo(cs0.x, cs0.y); g.lineTo(cs1.x, cs1.y); g.stroke(); g.restore(); }
+  // small gold crown badge centered on the hatch
+  const bC = project(cam, 0, FY(belt + 24), zf - 2);
+  if (bC.ahead && tlA > 0.2) drawCrown(g, bC.x, bC.y, 22 * bC.scale, 0.9 * tlA, true);
+
+  // rear tire hints — small dark contact patches tucked under the sill (not full wheels)
+  const whA = a * (1 - fold);
+  for (const side of [-1, 1]) {
+    const wx = side * (hw - 26), wz = zf + 120, cP = project(cam, wx, sill + 3, wz);
+    if (!cP.ahead) continue; const rw = 38 * cP.scale, rh = 17 * cP.scale;
+    g.save(); g.globalAlpha = whA * 0.9; g.fillStyle = '#03050d'; g.beginPath(); g.roundRect(cP.x - rw, cP.y - rh, rw * 2, rh * 2, rh); g.fill(); g.globalAlpha = 1; g.restore();
+  }
+}
+
+/* ============================================================================
+   PARKING BAY — painted white outline on dark asphalt + gold crown + P glyph.
+   The car folds down into this; the bay paints itself in B5.
+   ========================================================================= */
+function drawBay(cam, t, a) {
+  if (a <= 0.01) return; const g = ctx;
+  const X = carXform(t);
+  const cx = 0, zRear = CAR.rearZ + X.zOff - 30, zFront = CAR.frontZ + X.zOff - 120, hw = 250, yG = CAR.sill + 8;
+  // paint progression (lines draw on) — clip a growing wedge from rear→front
+  const paint = seg(t, 13.3, 15.0, easeLux);
+  const drawLine = (x0, z0, x1, z1, w, col, al) => {
+    const p0 = project(cam, cx + x0, yG, z0), p1 = project(cam, cx + x1, yG, z1);
+    if (!p0.ahead || !p1.ahead) return;
+    g.save(); g.globalAlpha = al; g.strokeStyle = col; g.lineWidth = Math.max(2, w * ((p0.scale + p1.scale) / 2)); g.lineCap = 'round';
+    g.beginPath(); g.moveTo(p0.x, p0.y); g.lineTo(p1.x, p1.y); g.stroke(); g.restore();
+  };
+  // two long side lines paint from rear toward front
+  const zP = lerp(zRear, zFront, paint);
+  drawLine(-hw, zRear, -hw, zP, 7, rgba(WHITE, 1), 0.85 * a);
+  drawLine(hw, zRear, hw, zP, 7, rgba(WHITE, 1), 0.85 * a);
+  // head line (rear) paints first
+  drawLine(-hw, zRear, hw, zRear, 7, rgba(WHITE, 1), 0.85 * a * clamp01(paint * 3));
+  // soft glow under the paint
+  const cP = project(cam, cx, yG, (zRear + zFront) / 2);
+  if (cP.ahead) glow(g, cP.x, cP.y, 260 * cP.scale, '#22304f', 0.10 * a);
+
+  // gold crown + P glyph painting itself in the bay center (stroke reveal)
+  const gpaint = seg(t, 14.3, 15.4, easeLux);
+  if (gpaint > 0.01) {
+    const gz = lerp(zRear, zFront, 0.5), gP = project(cam, cx, yG, gz);
+    if (gP.ahead) {
+      const s = 150 * gP.scale;
+      g.save(); g.translate(gP.x, gP.y);
+      // crown, clipped to a growing horizontal reveal
+      g.save(); g.beginPath(); g.rect(-s, -s * 1.4, s * 2 * clamp01(gpaint * 1.3), s * 2.8); g.clip();
+      g.globalAlpha = a; g.shadowColor = rgba(GOLD, 0.6); g.shadowBlur = s * 0.4;
+      const lg = g.createLinearGradient(0, -s * 0.9, 0, -s * 0.1); lg.addColorStop(0, SOFTG); lg.addColorStop(1, GOLD);
+      g.fillStyle = lg; crownPath(g, 0, -s * 0.42, s * 1.1); g.fill();
+      g.shadowBlur = 0;
+      // "P" glyph
+      g.lineWidth = s * 0.16; g.strokeStyle = GOLD; g.lineCap = 'round'; g.lineJoin = 'round';
+      g.beginPath();
+      g.moveTo(-s * 0.28, s * 0.72); g.lineTo(-s * 0.28, -s * 0.02);
+      g.lineTo(s * 0.06, -s * 0.02); g.quadraticCurveTo(s * 0.34, -s * 0.02, s * 0.34, s * 0.2);
+      g.quadraticCurveTo(s * 0.34, s * 0.42, s * 0.06, s * 0.42); g.lineTo(-s * 0.28, s * 0.42);
+      g.stroke();
+      g.restore(); g.restore();
+    }
+  }
+}
+
+/* ============================================================================
+   ENVIRONMENT BACKDROP — dark navy base, studio floor pool (B1–B3),
+   parking-lot ground (B4–B5). Always dark; soft vignette on top of it all.
+   ========================================================================= */
+function drawBackground(cam, t) {
+  const g = ctx;
+  // deep navy base with a faint vertical lift
+  let bg = g.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#070c1e'); bg.addColorStop(0.5, NAVY); bg.addColorStop(1, '#03060f');
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+
+  // studio floor pool (B1–B3) — a soft radial glow low-center under the device
+  const aStudio = 1 - seg(t, 5.9, 7.7, easeSoft);
+  if (aStudio > 0.01) {
+    const fP = project(cam, DEV_X, DEV_Y + 210, DEV_Z);
+    const fx = fP.ahead ? fP.x : W * 0.52, fy = fP.ahead ? fP.y : H * 0.72;
+    glow(g, fx, fy + 40, 720, '#141f3e', 0.55 * aStudio);
+    glow(g, fx, fy + 10, 380, ROYAL, 0.06 * aStudio);
+    // faint cool top haze + upper key
+    glow(g, W * 0.34, -60, 900, '#101a36', 0.5 * aStudio);
+    // subtle reflection smear of the screen under the device
+    const dP = project(cam, DEV_X, DEV_Y, DEV_Z), dev = deviceState(t);
+    if (dP.ahead) {
+      const rw = dev.w * dP.scale * 0.7, rh = dev.h * dP.scale * 0.9;
+      const ry = fy + 8;
+      const rg = g.createLinearGradient(0, ry, 0, ry + rh);
+      rg.addColorStop(0, rgba(ROYAL, 0.10 * aStudio)); rg.addColorStop(1, rgba(ROYAL, 0));
+      g.save(); g.globalAlpha = 1; g.fillStyle = rg; g.beginPath(); g.ellipse(dP.x, ry + rh * 0.4, rw * 0.5, rh * 0.5, 0, 0, TAU); g.fill(); g.restore();
+    }
+  }
+
+  // parking-lot ground (B4–B5) — DARK asphalt, cool horizon hint (never bright)
+  const aLot = seg(t, 9.6, 11.0, easeSoft);
+  if (aLot > 0.01) {
+    // horizon around mid-screen (varies with pitch); draw a dark asphalt gradient low
+    const horizon = H * lerp(0.42, 0.2, seg(t, 12.5, 16, easeSoft));
+    g.save(); g.globalAlpha = aLot;
+    // deep sky/navy above
+    let sky = g.createLinearGradient(0, 0, 0, horizon);
+    sky.addColorStop(0, '#060b1c'); sky.addColorStop(1, '#0a1226');
+    g.fillStyle = sky; g.fillRect(0, 0, W, horizon + 1);
+    // faint cool horizon glow
+    glow(g, W * 0.42, horizon, 700, '#14233f', 0.5);
+    glow(g, W * 0.7, horizon - 20, 420, SKY, 0.03);
+    // asphalt below — dark graphite-navy with a subtle sheen
+    let asf = g.createLinearGradient(0, horizon, 0, H);
+    asf.addColorStop(0, '#0a0f1f'); asf.addColorStop(0.4, '#080d1b'); asf.addColorStop(1, '#05070f');
+    g.fillStyle = asf; g.fillRect(0, horizon, W, H - horizon);
+    // distant lot bays (very faint painted lines receding) for depth
+    g.globalAlpha = aLot * 0.5;
+    for (let k = -3; k <= 3; k++) {
+      if (k === 0) continue;
+      const p0 = project(cam, k * 520, CAR.sill + 8, 200 + carXform(t).zOff), p1 = project(cam, k * 620, CAR.sill + 8, 1400 + carXform(t).zOff);
+      if (p0.ahead && p1.ahead) { g.strokeStyle = rgba('#33405f', 0.5); g.lineWidth = Math.max(1.6, 4 * ((p0.scale + p1.scale) / 2)); g.lineCap = 'round'; g.beginPath(); g.moveTo(p0.x, p0.y); g.lineTo(p1.x, p1.y); g.stroke(); }
+    }
+    g.restore();
+  }
+}
+
+/* ============================================================================
+   POST — vignette (always) + deterministic grain (≤3%)
+   ========================================================================= */
+function applyVignette(g, v) {
+  const rg = g.createRadialGradient(W * 0.5, H * 0.46, H * 0.34, W * 0.5, H * 0.5, W * 0.75);
+  rg.addColorStop(0, 'rgba(3,6,15,0)'); rg.addColorStop(1, 'rgba(3,6,15,' + v + ')');
+  g.fillStyle = rg; g.fillRect(0, 0, W, H);
+}
+function applyGrain(g, fi, a) {
+  if (a <= 0) return;
+  const r = mulberry32(0x9E37 + fi * 2654435761);
+  const tile = grainTiles[fi & (GRAIN_N - 1)];
+  const ox = Math.floor(r() * GRAIN_S), oy = Math.floor(r() * GRAIN_S);
+  g.save(); g.globalAlpha = a; g.globalCompositeOperation = 'overlay';
+  for (let y = -oy; y < H; y += GRAIN_S) for (let x = -ox; x < W; x += GRAIN_S) g.drawImage(tile, x, y);
+  g.restore();
+}
+
+/* ============================================================================
+   MASTER SEEK
+   ========================================================================= */
+function seek(tRaw) {
+  const t = Math.min(Math.max(tRaw, 0), DURATION - 1e-6);
+  const fi = Math.round(t * FPS);
+  const g = ctx;
+  g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+  g.lineJoin = 'round'; g.lineCap = 'round';   // round joins/caps everywhere (no shimmering hairlines)
+  const cam = camAt(t);
+  const dev = deviceState(t);
+
+  // alpha envelopes
+  const aInterior = seg(t, 5.9, 7.5, easeLux) * (1 - seg(t, 9.5, 10.4, easeSoft));
+  const aDevice = (1 - seg(t, 9.5, 10.3, easeSoft));
+  const aExterior = seg(t, 9.7, 10.9, easeLux) * (1 - seg(t, 14.8, 15.5, easeSoft));
+  const aBay = seg(t, 12.8, 13.7, easeLux);
+
+  drawBackground(cam, t);
+
+  // interior world (far parts) → device → interior world (near parts)
+  if (aInterior > 0.01) drawCabin(cam, t, aInterior, dev);
+  drawDevice(cam, t, aDevice);
+  if (aInterior > 0.01) drawCabinNear(cam, t, aInterior);
+
+  // exterior world (parking bay is the ground beneath the folding car)
+  if (aBay > 0.01) drawBay(cam, t, aBay);
+  if (aExterior > 0.01) drawCar(cam, t, aExterior);
+
+  // rear-glass pass — subtle dark tint + a faint streak as we cross the plane
+  // (stands in for the rear window; never bright — masks the interior→exterior handoff)
+  const gp = bell(ph(t, 9.5, 10.5));
+  if (gp > 0.01) {
+    g.save();
+    g.globalAlpha = 0.34 * gp; g.fillStyle = '#0a1226'; g.fillRect(0, 0, W, H);
+    const sy = lerp(-60, H + 60, ph(t, 9.62, 10.34));
+    const lg = g.createLinearGradient(0, sy - 80, 0, sy + 80);
+    lg.addColorStop(0, rgba(HAZE, 0)); lg.addColorStop(0.5, rgba(HAZE, 0.14 * gp)); lg.addColorStop(1, rgba(HAZE, 0));
+    g.globalAlpha = 1; g.fillStyle = lg; g.fillRect(0, sy - 80, W, 160);
+    g.restore();
+  }
+
+  // vignette (slightly deeper in the cabin, lighter in the studio/lot)
+  let v = 0.20;
+  if (t < 5.76) v = 0.18; else if (t < 9.5) v = lerp(0.18, 0.26, seg(t, 5.76, 8.0, easeSoft)); else v = lerp(0.26, 0.19, seg(t, 10.0, 12.2, easeSoft));
+  applyVignette(g, v);
+
+  // grain — deterministic, ≤3%
+  applyGrain(g, fi, 0.028);
+}
+
+window.PK = { W, H, FPS, DURATION, seek };
+seek(0);
+</script>
+</body>
+</html>
