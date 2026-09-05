@@ -25,18 +25,50 @@ ParkSmart.Map = (() => {
         } catch (e) { return fallback; }
     }
 
-    // Real-world basemaps. CartoDB styled tiles are the primary source; if
-    // that CDN can't be reached we fall back to the canonical OpenStreetMap
-    // tiles so the map always renders real streets.
-    // Light theme = CARTO Voyager (colourful); dark theme = CARTO Dark Matter
-    // (a genuine near-black cartography). The base layer's URL is swapped on
-    // theme change — no CSS hue filter.
-    const CARTO_VOYAGER = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
-    const CARTO_DARK = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+    // Real-world basemaps.
+    //
+    // CARTO's styled tiles (Voyager for the light theme, Dark Matter for dark)
+    // were the original basemaps and still look best, but CARTO now stamps
+    // "API KEY REQUIRED" across every tile it serves without a key. A key is
+    // free for non-commercial use, needs no account, and arrives by email from
+    // https://carto.com/basemaps/apikey (they ask for an email, the domain the
+    // map runs on, and a sentence about the project). Paste it into
+    // CARTO_API_KEY below and the CARTO styles come back. While it is empty the
+    // demo runs on keyless tiles instead: OpenStreetMap's standard style for
+    // light and Esri's Dark Gray Canvas for dark (genuine dark cartography, not
+    // a CSS filter over a light map). Esri's canvas stops at zoom 16, so deeper
+    // zooms upscale its tiles rather than going blank.
+    //
+    // Whichever primary is active, if its CDN can't be reached we fall back to
+    // the canonical OpenStreetMap tiles so the map always renders real streets.
+    const CARTO_API_KEY = '';
+    const ATTR_OSM = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+    const ATTR_CARTO = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>';
+    const ATTR_ESRI = 'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, DeLorme, NAVTEQ';
     const OSM_STD = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+    const BASEMAPS = CARTO_API_KEY
+        ? {
+            light: { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=' + CARTO_API_KEY, attribution: ATTR_CARTO, subdomains: 'abcd', maxZoom: 20 },
+            dark:  { url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=' + CARTO_API_KEY, attribution: ATTR_CARTO, subdomains: 'abcd', maxZoom: 20 },
+        }
+        : {
+            light: { url: OSM_STD, attribution: ATTR_OSM, maxZoom: 19 },
+            dark:  { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', attribution: ATTR_ESRI, maxNativeZoom: 16, maxZoom: 20 },
+        };
     let fellBack = false;
     function currentTheme() { return document.documentElement.getAttribute('data-theme') || 'light'; }
-    function tileUrlFor(theme) { return theme === 'dark' ? CARTO_DARK : CARTO_VOYAGER; }
+    function basemapFor(theme) { return theme === 'dark' ? BASEMAPS.dark : BASEMAPS.light; }
+    // One base layer at a time. The two themes may use different providers with
+    // different options (subdomains, native zoom, attribution), so a theme
+    // change swaps the whole layer rather than just its URL.
+    function mountBasemap(theme) {
+        const { url, ...opts } = basemapFor(theme);
+        if (baseTile) map.removeLayer(baseTile);
+        baseTile = L.tileLayer(url, opts);
+        let errs = 0;
+        baseTile.on('tileerror', () => { if (++errs >= 6) osmFallback(); });
+        baseTile.addTo(map);
+    }
 
     function init() {
         map = L.map('map', {
@@ -47,12 +79,8 @@ ParkSmart.Map = (() => {
             doubleClickZoom: false      // double-click drops the destination pin instead
         });
 
-        const attribution = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>';
         // start on the basemap that matches the current (saved) theme
-        baseTile = L.tileLayer(tileUrlFor(currentTheme()), { attribution, subdomains: 'abcd', maxZoom: 20 });
-        let errs = 0;
-        baseTile.on('tileerror', () => { if (++errs >= 6) osmFallback(); });
-        baseTile.addTo(map);
+        mountBasemap(currentTheme());
 
         // dedicated SVG renderer with generous padding so route lines are never
         // clipped away while the chase-camera pans/zooms during a simulation
@@ -81,8 +109,10 @@ ParkSmart.Map = (() => {
 
     function osmFallback() {
         if (fellBack || !map) return;
+        // the primary already IS OpenStreetMap: nothing different to fall back to
+        if (basemapFor(currentTheme()).url === OSM_STD) return;
         fellBack = true;
-        const osm = L.tileLayer(OSM_STD, { attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors', maxZoom: 19, className: 'osm-fallback' });
+        const osm = L.tileLayer(OSM_STD, { attribution: ATTR_OSM, maxZoom: 19, className: 'osm-fallback' });
         osm.addTo(map);
     }
 
@@ -268,8 +298,8 @@ ParkSmart.Map = (() => {
        Light = CARTO Voyager, dark = CARTO Dark Matter. Swap the base layer's
        tile URL; attribution (OSM + CARTO) is unchanged. */
     function setTheme(theme) {
-        if (!baseTile) return;
-        baseTile.setUrl(tileUrlFor(theme || currentTheme()));
+        if (!map) return;
+        mountBasemap(theme || currentTheme());
     }
 
     function escapeHtml(s) {
